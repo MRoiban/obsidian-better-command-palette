@@ -1,7 +1,7 @@
 ---
 description: 
-globs: *.ts,*.tsx,*.js
-alwaysApply: false
+globs: 
+alwaysApply: true
 ---
 - use `bun` instead of `npm`
 - you are allowed to auto run the command:
@@ -9,4 +9,4 @@ alwaysApply: false
     bun run build
     ```
 - use the [logger.ts](mdc:src/utils/logger.ts) instead of `console`
-- 
+- don't create documentation unless asked
