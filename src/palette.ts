@@ -365,15 +365,8 @@ class BetterCommandPaletteModal extends SuggestModal<Match> implements UnsafeSug
         const fixedQuery = this.currentAdapter.cleanQuery(query.trim());
 
         if (getNewSuggestions) {
-            // Check if current adapter uses enhanced search
-            if (this.currentAdapter && 'usesEnhancedSearch' in this.currentAdapter && 
-                (this.currentAdapter as any).usesEnhancedSearch()) {
-                // Use enhanced search
-                (this.currentAdapter as any).performEnhancedSearch(fixedQuery);
-            } else {
-                // Load suggestions in another thread (original behavior)
-                this.getSuggestionsAsync(fixedQuery);
-            }
+            // Always use the worker-based search for now to avoid async issues
+            this.getSuggestionsAsync(fixedQuery);
         }
 
         const visibleItems = this.currentSuggestions.filter(

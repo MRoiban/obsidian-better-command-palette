@@ -113,33 +113,10 @@ export default class EnhancedFileAdapter extends SuggestModalAdapter {
      * Override to use enhanced search when available
      */
     async getSearchResults(query: string): Promise<Match[]> {
-        if (!this.searchService) {
-            // Fallback to original behavior
-            return this.getSortedItems().filter(item => 
-                item.text.toLowerCase().includes(query.toLowerCase())
-            );
-        }
-
-        try {
-            const cleanQuery = this.cleanQuery(query);
-            if (!cleanQuery.trim()) {
-                return this.getSortedItems();
-            }
-
-            const enhancedResults = await this.searchService.search(cleanQuery, this.plugin.settings.suggestionLimit);
-            
-            // Convert enhanced results back to Match format
-            return enhancedResults.map(result => new PaletteMatch(
-                result.id,
-                result.metadata.path,
-                [] // Tags handled differently in enhanced results
-            ));
-        } catch (error) {
-            console.error('Enhanced search failed, falling back to basic search:', error);
-            return this.getSortedItems().filter(item => 
-                item.text.toLowerCase().includes(query.toLowerCase())
-            );
-        }
+        // For now, always fallback to original behavior to avoid loops
+        return this.getSortedItems().filter(item => 
+            item.text.toLowerCase().includes(query.toLowerCase())
+        );
     }
 
     renderSuggestion(match: Match, content: HTMLElement, aux?: HTMLElement): void {
@@ -249,7 +226,7 @@ export default class EnhancedFileAdapter extends SuggestModalAdapter {
      * Indicates this adapter uses enhanced search and should bypass worker-based search
      */
     usesEnhancedSearch(): boolean {
-        return this.searchService !== null;
+        return false; // Disable enhanced search to avoid loops for now
     }
 
     /**
@@ -270,7 +247,7 @@ export default class EnhancedFileAdapter extends SuggestModalAdapter {
                 const allFiles = this.getSortedItems();
                 this.palette.currentSuggestions = allFiles.slice(0, this.plugin.settings.suggestionLimit);
                 this.palette.limit = this.palette.currentSuggestions.length;
-                this.palette.updateSuggestions();
+                // Don't call updateSuggestions() here to avoid infinite loop
                 return;
             }
 
@@ -286,7 +263,7 @@ export default class EnhancedFileAdapter extends SuggestModalAdapter {
 
             this.palette.currentSuggestions = matches;
             this.palette.limit = matches.length;
-            this.palette.updateSuggestions();
+            // Don't call updateSuggestions() here to avoid infinite loop
         } catch (error) {
             console.error('Enhanced search failed:', error);
             // Fallback to original search behavior
