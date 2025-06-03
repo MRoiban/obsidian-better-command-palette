@@ -294,6 +294,13 @@ export class EnhancedSearchService {
                 if (!cacheValid) {
                     console.log('Enhanced search: Cache is outdated, will rebuild index');
                     await this.searchIndex.clear();
+                    // Also clear metadata to avoid inconsistent state
+                    try {
+                        await this.persistence.clear();
+                        console.log('Enhanced search: Cleared cached metadata to match cleared index');
+                    } catch (error) {
+                        console.warn('Enhanced search: Failed to clear cached metadata:', error);
+                    }
                 } else {
                     console.log('Enhanced search: Cache is valid, skipping full reindex');
                     return; // Cache is valid, no need to reindex everything
@@ -806,10 +813,27 @@ export class EnhancedSearchService {
             headings: metadata?.headings?.map(h => ({ heading: h.heading, level: h.level })) || [],
             frontmatter: metadata?.frontmatter || {},
             tags: metadata?.tags?.map(t => t.tag) || [],
-            aliases: metadata?.frontmatter?.aliases || [],
+            aliases: this.normalizeAliases(metadata?.frontmatter?.aliases),
             links: metadata?.links?.map(l => l.link) || [],
             size: file.stat.size,
             lastModified: file.stat.mtime
         };
+    }
+
+    /**
+     * Normalize aliases to always return an array
+     * In Obsidian frontmatter, aliases can be either a string or an array
+     */
+    private normalizeAliases(aliases: any): string[] {
+        if (!aliases) {
+            return [];
+        }
+        if (Array.isArray(aliases)) {
+            return aliases.filter(alias => typeof alias === 'string');
+        }
+        if (typeof aliases === 'string') {
+            return [aliases];
+        }
+        return [];
     }
 }

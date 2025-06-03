@@ -168,7 +168,7 @@ export class MiniSearchAdapter implements SearchIndex {
             title: metadata.title || this.extractTitle(content) || '',
             headings: this.extractHeadings(content).join(' '),
             tags: (metadata.tags || []).join(' '),
-            aliases: (metadata.aliases || []).join(' '),
+            aliases: this.normalizeAliasesArray(metadata.aliases).join(' '),
             path: metadata.path
         };
 
@@ -326,5 +326,21 @@ export class MiniSearchAdapter implements SearchIndex {
      */
     async loadFromData(data: any): Promise<void> {
         return this.importIndex(data);
+    }
+
+    /**
+     * Normalize aliases to ensure it's always an array for safe joining
+     */
+    private normalizeAliasesArray(aliases: any): string[] {
+        if (!aliases) {
+            return [];
+        }
+        if (Array.isArray(aliases)) {
+            return aliases.filter(alias => typeof alias === 'string');
+        }
+        if (typeof aliases === 'string') {
+            return [aliases];
+        }
+        return [];
     }
 }
