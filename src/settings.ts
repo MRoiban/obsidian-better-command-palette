@@ -4,6 +4,8 @@ import {
 import BetterCommandPalettePlugin from 'src/main';
 import { HotkeyStyleType, MacroCommandInterface, UnsafeAppInterface } from './types/types';
 import { SettingsCommandSuggestModal } from './utils';
+import { SearchSettings } from './search/interfaces';
+import { SearchSettingsPanel } from './search/settings-panel';
 
 export interface BetterCommandPalettePluginSettings {
     closeWithBackspace: boolean,
@@ -27,6 +29,7 @@ export interface BetterCommandPalettePluginSettings {
     hiddenFiles: string[],
     hiddenTags: string[],
     fileTypeExclusion: string[],
+    enhancedSearch: SearchSettings,
 }
 
 export const DEFAULT_SETTINGS: BetterCommandPalettePluginSettings = {
@@ -51,6 +54,26 @@ export const DEFAULT_SETTINGS: BetterCommandPalettePluginSettings = {
     hiddenFiles: [],
     hiddenTags: [],
     fileTypeExclusion: [],
+    enhancedSearch: {
+        scoreWeights: {
+            relevance: 0.6,
+            recency: 0.25,
+            frequency: 0.15
+        },
+        recencyHalfLife: 7 * 24 * 60 * 60 * 1000, // 7 days in ms
+        maxUsageScore: 100,
+        maxIndexedFiles: 10000,
+        enableUsageTracking: true,
+        indexingDebounceMs: 1000,        // Increased debounce for less frequent updates
+        searchTimeoutMs: 5000,
+        contentPreviewLength: 200,
+        enableContentSearch: true,
+        // Performance settings for smoother indexing
+        indexingBatchSize: 2,            // Small batches for better responsiveness
+        indexingDelayMs: 150,            // Longer delay between files
+        indexingBatchDelayMs: 400,       // Longer delay between batches
+        maxFileSize: 512 * 1024          // 512KB limit for better performance
+    }
 };
 
 export class BetterCommandPaletteSettingTab extends PluginSettingTab {
@@ -66,6 +89,7 @@ export class BetterCommandPaletteSettingTab extends PluginSettingTab {
     display (): void {
         this.containerEl.empty();
         this.displayBasicSettings();
+        this.displayEnhancedSearchSettings();
         this.displayMacroSettings();
     }
 
@@ -237,6 +261,16 @@ export class BetterCommandPaletteSettingTab extends PluginSettingTab {
                     await this.plugin.saveSettings();
                     this.display();
                 }));
+    }
+
+    displayEnhancedSearchSettings(): void {
+        const { containerEl } = this;
+        
+        // Create a section for enhanced search settings
+        containerEl.createEl('h2', { text: 'Enhanced Content Search' });
+        
+        const searchSettingsPanel = new SearchSettingsPanel(this.plugin, containerEl);
+        searchSettingsPanel.display();
     }
 
     displayMacroSettings (): void {

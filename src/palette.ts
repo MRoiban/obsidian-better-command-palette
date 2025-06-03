@@ -9,7 +9,9 @@ import {
     BetterCommandPaletteFileAdapter,
     BetterCommandPaletteTagAdapter,
 } from 'src/palette-modal-adapters';
+import EnhancedFileAdapter from 'src/palette-modal-adapters/enhanced-file-adapter';
 import BetterCommandPalettePlugin from 'src/main';
+import { EnhancedSearchService } from 'src/search/enhanced-search-service';
 import { ActionType } from './utils/constants';
 
 class BetterCommandPaletteModal extends SuggestModal<Match> implements UnsafeSuggestModalInterface {
@@ -42,7 +44,7 @@ class BetterCommandPaletteModal extends SuggestModal<Match> implements UnsafeSug
 
     commandAdapter: BetterCommandPaletteCommandAdapter;
 
-    fileAdapter: BetterCommandPaletteFileAdapter;
+    fileAdapter: BetterCommandPaletteFileAdapter | EnhancedFileAdapter;
 
     tagAdapter: BetterCommandPaletteTagAdapter;
 
@@ -56,6 +58,7 @@ class BetterCommandPaletteModal extends SuggestModal<Match> implements UnsafeSug
         prevTags: OrderedSet<Match>,
         plugin: BetterCommandPalettePlugin,
         suggestionsWorker: Worker,
+        searchService: EnhancedSearchService,
         initialInputValue = '',
     ) {
         super(app);
@@ -80,12 +83,16 @@ class BetterCommandPaletteModal extends SuggestModal<Match> implements UnsafeSug
             plugin,
             this,
         );
-        this.fileAdapter = new BetterCommandPaletteFileAdapter(
+        
+        // Use enhanced file adapter which will fallback to original behavior if needed
+        this.fileAdapter = new EnhancedFileAdapter(
             app,
             new OrderedSet<Match>(),
             plugin,
             this,
+            searchService,
         );
+        
         this.tagAdapter = new BetterCommandPaletteTagAdapter(
             app,
             prevTags,
@@ -342,8 +349,15 @@ class BetterCommandPaletteModal extends SuggestModal<Match> implements UnsafeSug
         const fixedQuery = this.currentAdapter.cleanQuery(query.trim());
 
         if (getNewSuggestions) {
-            // Load suggestions in another thread
-            this.getSuggestionsAsync(fixedQuery);
+            // Check if current adapter uses enhanced search
+            if (this.currentAdapter && 'usesEnhancedSearch' in this.currentAdapter && 
+                (this.currentAdapter as any).usesEnhancedSearch()) {
+                // Use enhanced search
+                (this.currentAdapter as any).performEnhancedSearch(fixedQuery);
+            } else {
+                // Load suggestions in another thread (original behavior)
+                this.getSuggestionsAsync(fixedQuery);
+            }
         }
 
         const visibleItems = this.currentSuggestions.filter(
