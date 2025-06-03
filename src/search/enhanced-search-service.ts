@@ -60,6 +60,12 @@ export class EnhancedSearchService {
             await this.loadPersistedData();
             console.log('Enhanced search: Data loaded');
 
+            // Set up file getter for indexing coordinator
+            this.indexingCoordinator.setFileGetter((path: string) => {
+                const file = this.app.vault.getAbstractFileByPath(path);
+                return (file instanceof TFile) ? file : null;
+            });
+
             // Set up file system watchers
             this.setupFileWatchers();
             console.log('Enhanced search: File watchers set up');

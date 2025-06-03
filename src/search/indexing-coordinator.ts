@@ -21,6 +21,7 @@ export class IndexingCoordinator {
     private isInitialized = false;
     private debounceMs: number;
     private requestTimeout: number;
+    private getFileByPath?: (path: string) => TFile | null;
 
     constructor(
         searchIndex: SearchIndex,
@@ -127,6 +128,7 @@ export class IndexingCoordinator {
 
     /**
      * Index a file with debouncing to handle rapid updates
+     * Includes content change detection to optimize reindexing
      */
     async indexFile(file: TFile, content?: string): Promise<void> {
         // Clear any pending update for this file
@@ -138,7 +140,18 @@ export class IndexingCoordinator {
         this.pendingUpdates.set(file.path, setTimeout(async () => {
             try {
                 const fileContent = content || await this.readFileContent(file);
-                const metadata = this.extractMetadata(file, fileContent);
+                const newMetadata = this.extractMetadata(file, fileContent);
+
+                // Check if content has actually changed to avoid unnecessary reindexing
+                const shouldReindex = await this.shouldReindexFile(file.path, newMetadata);
+                
+                if (!shouldReindex) {
+                    console.log(`Enhanced search: Skipping reindex of ${file.path} - content unchanged`);
+                    this.pendingUpdates.delete(file.path);
+                    return;
+                }
+
+                console.log(`Enhanced search: Reindexing ${file.path} due to content changes`);
 
                 // Store content for persistence
                 await this.contentStore.set(file.path, fileContent);
@@ -146,10 +159,16 @@ export class IndexingCoordinator {
                 // Send to worker for indexing
                 await this.sendWorkerMessage({
                     type: 'INDEX_FILE',
-                    payload: { id: file.path, content: fileContent, metadata }
+                    payload: { id: file.path, content: fileContent, metadata: newMetadata }
                 });
 
+                // Update the last indexed time and content hash in persistence
+                await this.updateIndexMetadata(file.path, newMetadata);
+
                 this.pendingUpdates.delete(file.path);
+                
+                // Trigger debounced callback to notify about the indexing
+                this.debounceCallback(file.path, 'modify');
             } catch (error) {
                 console.error(`Failed to index file ${file.path}:`, error);
                 this.pendingUpdates.delete(file.path);
@@ -320,10 +339,30 @@ export class IndexingCoordinator {
 
     /**
      * Schedule a file update with debouncing
+     * Ensures proper handling of file edits and modifications
      */
     async scheduleFileUpdate(filePath: string, operation: 'create' | 'modify' | 'delete'): Promise<void> {
-        // Call the debounced callback directly - the debounce function will handle the timing
+        console.log(`Enhanced search: Scheduling ${operation} operation for ${filePath}`);
+        
+        // For file modifications (edits), ensure we mark it for reindexing
+        if (operation === 'modify') {
+            // Get the actual TFile object to trigger proper reindexing
+            const file = this.getFileByPath?.(filePath);
+            if (file) {
+                await this.indexFile(file);
+                return;
+            }
+        }
+
+        // For other operations or if we can't get the file object, use the callback
         this.debounceCallback(filePath, operation);
+    }
+
+    /**
+     * Set a reference to the file getter function for accessing TFile objects
+     */
+    setFileGetter(getFileByPath: (path: string) => TFile | null): void {
+        this.getFileByPath = getFileByPath;
     }
 
     /**
@@ -359,5 +398,96 @@ export class IndexingCoordinator {
 
         // Terminate worker
         this.worker.terminate();
+    }
+
+    /**
+     * Check if a file should be reindexed based on content changes
+     */
+    private async shouldReindexFile(filePath: string, newMetadata: FileMetadata): Promise<boolean> {
+        try {
+            // Check if we have existing metadata stored
+            const existingMetadata = await this.persistence.getMetadata?.(filePath);
+            
+            if (!existingMetadata) {
+                // No existing metadata means this is a new file or hasn't been indexed yet
+                return true;
+            }
+
+            // Compare content hashes to detect changes
+            if (existingMetadata.contentHash !== newMetadata.contentHash) {
+                console.log(`Enhanced search: Content hash changed for ${filePath}`);
+                return true;
+            }
+
+            // Compare last modified times
+            if (existingMetadata.lastModified !== newMetadata.lastModified) {
+                console.log(`Enhanced search: Last modified time changed for ${filePath}`);
+                return true;
+            }
+
+            // Compare file sizes
+            if (existingMetadata.size !== newMetadata.size) {
+                console.log(`Enhanced search: File size changed for ${filePath}`);
+                return true;
+            }
+
+            return false;
+        } catch (error) {
+            console.warn(`Enhanced search: Error checking if file should be reindexed ${filePath}:`, error);
+            // If we can't determine, err on the side of reindexing
+            return true;
+        }
+    }
+
+    /**
+     * Update metadata in persistence after successful indexing
+     */
+    private async updateIndexMetadata(filePath: string, metadata: FileMetadata): Promise<void> {
+        try {
+            if (this.persistence.setMetadata) {
+                const indexedMetadata = {
+                    ...metadata,
+                    indexedAt: Date.now()
+                };
+                await this.persistence.setMetadata(filePath, indexedMetadata);
+            }
+        } catch (error) {
+            console.warn(`Enhanced search: Failed to update index metadata for ${filePath}:`, error);
+        }
+    }
+
+    /**
+     * Force reindexing of a file, bypassing content change detection
+     */
+    async forceReindexFile(file: TFile, content?: string): Promise<void> {
+        // Clear any pending update for this file
+        if (this.pendingUpdates.has(file.path)) {
+            clearTimeout(this.pendingUpdates.get(file.path)!);
+        }
+
+        try {
+            const fileContent = content || await this.readFileContent(file);
+            const metadata = this.extractMetadata(file, fileContent);
+
+            console.log(`Enhanced search: Force reindexing ${file.path}`);
+
+            // Store content for persistence
+            await this.contentStore.set(file.path, fileContent);
+
+            // Send to worker for indexing
+            await this.sendWorkerMessage({
+                type: 'INDEX_FILE',
+                payload: { id: file.path, content: fileContent, metadata }
+            });
+
+            // Update the last indexed time and content hash in persistence
+            await this.updateIndexMetadata(file.path, metadata);
+
+            // Trigger debounced callback to notify about the indexing
+            this.debounceCallback(file.path, 'modify');
+        } catch (error) {
+            console.error(`Failed to force reindex file ${file.path}:`, error);
+            throw error;
+        }
     }
 }
