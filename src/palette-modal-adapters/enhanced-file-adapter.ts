@@ -28,6 +28,9 @@ export default class EnhancedFileAdapter extends SuggestModalAdapter {
     constructor(app: any, prevItems: any, plugin: any, palette: any, searchService?: EnhancedSearchService) {
         super(app, prevItems, plugin, palette);
         this.searchService = searchService;
+        // Initialize these properties to avoid undefined errors during early access
+        this.unresolvedItems = new OrderedSet<Match>();
+        this.allItems = [];
     }
 
     initialize(): void {

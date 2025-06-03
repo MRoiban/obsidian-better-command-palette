@@ -205,7 +205,13 @@ class BetterCommandPaletteModal extends SuggestModal<Match> implements UnsafeSug
         // result flickering before this is set
         // As far as I can tell onOpen resets the value of the input so this is the first place
         if (this.initialInputValue) {
-            this.setQuery(this.initialInputValue);
+            // Instead of just setting the query, we need to:
+            // 1. Set the input value directly
+            this.inputEl.value = this.initialInputValue;
+            // 2. Update the action type based on the prefix
+            this.updateActionType();
+            // 3. Force an immediate suggestion update
+            this.updateSuggestions();
         }
     }
 
@@ -349,7 +355,12 @@ class BetterCommandPaletteModal extends SuggestModal<Match> implements UnsafeSug
         // The action type might have changed
         this.updateActionType();
 
-        const getNewSuggestions = query !== this.lastQuery;
+        // Initialize the adapter if it hasn't been initialized yet
+        if (!this.currentAdapter.initialized) {
+            this.currentAdapter.initialize();
+        }
+        
+        const getNewSuggestions = query !== this.lastQuery || this.currentSuggestions.length === 0;
         this.lastQuery = query;
         const fixedQuery = this.currentAdapter.cleanQuery(query.trim());
 
