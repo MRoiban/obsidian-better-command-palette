@@ -47,6 +47,7 @@
 		"yargs": "^17.3.1"
 	},
 	"dependencies": {
-		"fuzzysort": "^1.1.4"
+		"fuzzysort": "^1.1.4",
+		"minisearch": "^7.1.2"
 	}
 }
