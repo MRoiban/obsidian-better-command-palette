@@ -1,9 +1,14 @@
 {
 	"name": "obsidian-better-command-palette",
-	"version": "0.17.1",
+	"version": "0.17.2",
 	"description": "A command palette that does all of the things you want it to do.",
 	"main": "main.js",
 	"type": "module",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/MRoiban/obsidian-better-command-palette.git"
+	},
+	"homepage": "https://github.com/MRoiban/obsidian-better-command-palette",
 	"scripts": {
 		"dev": "rollup --config rollup.config.js -w",
 		"build": "NODE_ENV=production rollup --config rollup.config.js",
@@ -14,7 +19,7 @@
 		"tool:gen-files": "node ./tools/generate-test-files.js"
 	},
 	"keywords": [],
-	"author": "",
+	"author": "MRoiban",
 	"license": "MIT",
 	"devDependencies": {
 		"@rollup/plugin-commonjs": "^21.0.1",
