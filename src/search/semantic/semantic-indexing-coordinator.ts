@@ -59,7 +59,7 @@ export class SemanticIndexingCoordinator {
                 logger.info('Semantic indexing: No files indexed, checking connection and starting auto-indexing...');
                 
                 // Check if Ollama is available before auto-indexing
-                const isAvailable = await this.embeddingService.checkOllamaConnection();
+                const isAvailable = await this.embeddingService.checkConnection();
                 if (isAvailable) {
                     logger.info('Semantic indexing: Starting auto-indexing of all files');
                     await this.indexAllFiles();
@@ -67,13 +67,7 @@ export class SemanticIndexingCoordinator {
                     logger.warn('Semantic indexing: Ollama not available, skipping auto-indexing');
                 }
             } else {
-                // Check if we have a reasonable number of files indexed
-                const markdownFiles = this.embeddingService.getMarkdownFiles();
-                const threshold = Math.min(markdownFiles.length * 0.8, 50); // 80% or 50 files max
-                
-                if (indexedCount < threshold && markdownFiles.length > 10) {
-                    logger.info(`Semantic indexing: ${indexedCount} files already indexed, no auto-indexing needed`);
-                }
+                logger.info(`Semantic indexing: ${indexedCount} files already indexed, skipping auto-indexing`);
             }
         } catch (error) {
             logger.error('Semantic indexing: Error in auto-indexing check:', error);
@@ -169,7 +163,7 @@ export class SemanticIndexingCoordinator {
 
         try {
             logger.debug(`Semantic indexing: Removing file ${filePath}`);
-            this.embeddingService.removeEmbedding(filePath);
+            this.embeddingService.removeFromCache(filePath);
         } catch (error) {
             logger.error(`Semantic indexing: Error removing file ${filePath}:`, error);
             throw error;
@@ -184,10 +178,10 @@ export class SemanticIndexingCoordinator {
             logger.debug(`Semantic indexing: Handling file rename from ${oldPath} to ${newPath}`);
             
             // Remove old embedding and index new file
-            this.embeddingService.removeEmbedding(oldPath);
+            this.embeddingService.removeFromCache(oldPath);
             
             // Find the new file and index it
-            const file = this.embeddingService.getFileByPath(newPath);
+            const file = this.app.vault.getAbstractFileByPath(newPath) as TFile;
             if (file) {
                 await this.indexFile(file);
             }
@@ -204,7 +198,7 @@ export class SemanticIndexingCoordinator {
             logger.debug(`Semantic indexing: Force reindexing file ${file.path}`);
             
             // Remove existing embedding first
-            this.embeddingService.removeEmbedding(file.path);
+            this.embeddingService.removeFromCache(file.path);
             
             // Then reindex
             await this.indexFile(file);
@@ -237,7 +231,7 @@ export class SemanticIndexingCoordinator {
             this.isIndexing = false;
             
             // Clear the embedding service index
-            await this.embeddingService.clearAllEmbeddings();
+            this.embeddingService.clearCache();
             
             logger.info('Semantic indexing: Index cleared successfully');
         } catch (error) {
