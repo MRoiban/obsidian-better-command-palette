@@ -187,7 +187,7 @@
     --text-normal: var(--bcp-tx);
     --text-muted: var(--bcp-tx-2);
     --text-faint: var(--bcp-tx-3);
-    --text-accent: var(--bcp-bl);
+    --text-accent: var(--color-accent);
     --text-error: var(--bcp-re);
     --text-success: var(--bcp-gr);
     --text-warning: var(--bcp-or);
@@ -199,18 +199,11 @@
     
     --background-modifier-border: var(--bcp-ui-3);
     --background-modifier-border-hover: var(--bcp-tx-3);
-    --background-modifier-border-focus: var(--bcp-bl);
+    --background-modifier-border-focus: var(--color-accent);
     
     --background-modifier-hover: rgba(var(--flexoki-base-500-rgb), 0.1);
-    --background-modifier-active-hover: rgba(var(--bcp-bl-rgb), 0.1);
-    --background-modifier-selected: rgba(var(--bcp-bl-rgb), 0.15);
-    
-    --color-accent: var(--bcp-bl);
-    --color-accent-hover: var(--bcp-bl-2);
-    
-    --interactive-accent: var(--bcp-bl);
-    --interactive-accent-hover: var(--bcp-bl-2);
-    --text-on-accent: var(--flexoki-paper);
+    --background-modifier-active-hover: rgba(var(--accent-h), var(--accent-s), var(--accent-l), 0.1);
+    --background-modifier-selected: rgba(var(--accent-h), var(--accent-s), var(--accent-l), 0.15);
     
     /* File type specific colors using Flexoki accents */
     .file-type-indicator {
