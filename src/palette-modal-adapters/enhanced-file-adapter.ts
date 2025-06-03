@@ -5,12 +5,13 @@ import {
     generateHotKeyText,
     getOrCreateFile,
     openFileWithEventKeys,
+    OrderedSet,
     PaletteMatch, SuggestModalAdapter,
+    createPaletteMatchesFromFilePath,
 } from '../utils';
 import { Match, UnsafeAppInterface } from '../types/types';
 import { ActionType } from '../utils/constants';
 import { EnhancedSearchService } from '../search/enhanced-search-service';
-import { SearchResultItem } from '../ui/search-result-item';
 
 /**
  * Enhanced file adapter that uses the new search system
@@ -20,6 +21,7 @@ export default class EnhancedFileAdapter extends SuggestModalAdapter {
     emptyStateText: string;
     app: UnsafeAppInterface;
     allItems: Match[];
+    unresolvedItems: OrderedSet<Match>;
     fileSearchPrefix: string;
     private searchService?: EnhancedSearchService;
 
@@ -38,9 +40,48 @@ export default class EnhancedFileAdapter extends SuggestModalAdapter {
         this.hiddenIds = this.plugin.settings.hiddenFiles;
         this.hiddenIdsSettingsKey = 'hiddenFiles';
 
-        // Initialize with all files (fallback for when search service isn't available)
         this.allItems = [];
-        this.loadAllFiles();
+        this.unresolvedItems = new OrderedSet<Match>();
+
+        // Load all files like the original adapter
+        this.app.metadataCache.getCachedFiles()
+            .forEach((filePath: string) => {
+                // Validate file path
+                if (!filePath || typeof filePath !== 'string') {
+                    return;
+                }
+
+                const badfileType = this.plugin.settings.fileTypeExclusion.some((suf) => filePath.endsWith(`.${suf}`));
+
+                // If we shouldn't show the file type just return right now
+                if (badfileType) return;
+
+                const matches = createPaletteMatchesFromFilePath(this.app.metadataCache, filePath);
+                this.allItems = this.allItems.concat(matches);
+
+                // Add unresolved links with validation
+                const unresolvedLinks = this.app.metadataCache.unresolvedLinks[filePath];
+                if (unresolvedLinks && typeof unresolvedLinks === 'object') {
+                    Object.keys(unresolvedLinks).forEach((p) => {
+                        if (p && typeof p === 'string' && p.trim()) {
+                            this.unresolvedItems.add(new PaletteMatch(p, p));
+                        }
+                    });
+                }
+            });
+
+        // Add the deduped links to all items
+        this.allItems = this.allItems.concat(Array.from(this.unresolvedItems.values())).reverse();
+
+        // Use obsidian's last open files as the previous items
+        [...this.app.workspace.getLastOpenFiles()].reverse().forEach((filePath) => {
+            const matches = createPaletteMatchesFromFilePath(this.app.metadataCache, filePath);
+
+            // For previous items we only want the actual file, not any aliases
+            if (matches[0]) {
+                this.prevItems.add(matches[0]);
+            }
+        });
     }
 
     mount(): void {
@@ -99,37 +140,8 @@ export default class EnhancedFileAdapter extends SuggestModalAdapter {
     }
 
     renderSuggestion(match: Match, content: HTMLElement, aux?: HTMLElement): void {
-        if (this.searchService && aux) {
-            // For basic Match objects, create a minimal enhanced result
-            const enhancedResult = {
-                id: match.id,
-                score: 1.0,
-                matches: {},
-                metadata: {
-                    path: match.text,
-                    title: match.text.split('/').pop()?.replace('.md', '') || match.text,
-                    lastModified: Date.now()
-                },
-                combinedScore: 1.0,
-                contentScore: 1.0,
-                usageScore: 0,
-                recencyScore: 0
-            };
-
-            // Use enhanced rendering with search result item
-            const searchResultItem = new SearchResultItem(
-                enhancedResult,
-                (result, event) => {
-                    // Handle selection
-                    this.onChooseSuggestion(match, event as MouseEvent | KeyboardEvent);
-                }
-            );
-            
-            searchResultItem.render(content);
-        } else {
-            // Fallback to original rendering
-            this.renderOriginalSuggestion(match, content);
-        }
+        // Always use the original file adapter rendering style
+        this.renderOriginalSuggestion(match, content);
     }
 
     private renderOriginalSuggestion(match: Match, content: HTMLElement): void {
@@ -149,6 +161,11 @@ export default class EnhancedFileAdapter extends SuggestModalAdapter {
             cls: 'suggestion-title',
             text: noteName
         });
+
+        // Add unresolved styling if this is an unresolved link
+        if (this.unresolvedItems.has(match)) {
+            suggestionEl.addClass('unresolved');
+        }
 
         if (match.id.includes(':')) {
             // Set Icon will destroy the first element in a node. So we need to add one back
