@@ -170,12 +170,26 @@ export class EnhancedSearchService {
     }
 
     /**
-     * Record search selection for usage tracking
+     * Record search selection for analytics
      */
     recordSearchSelection(query: string, selectedPath: string): void {
-        if (this.settings.enableUsageTracking) {
-            this.usageTracker.recordSearch(query, selectedPath);
+        if (!this.isInitialized) {
+            logger.warn('Enhanced search: Cannot record search selection - service not initialized');
+            return;
         }
+        
+        this.usageTracker.recordSearch(query, selectedPath);
+    }
+
+    /**
+     * Get the last opened time for a file
+     */
+    getLastOpened(path: string): number | undefined {
+        if (!this.isInitialized) {
+            return undefined;
+        }
+        
+        return this.usageTracker.getLastOpened(path);
     }
 
     /**
@@ -770,7 +784,7 @@ export class EnhancedSearchService {
             try {
                 // Check if we have metadata for this file
                 const metadata = await this.persistence.getMetadata(file.path);
-                logger.debug(`Enhanced search: Metadata check for ${file.path}:`, metadata ? 'found' : 'not found', metadata);
+                logger.debug(`Enhanced search: Metadata check for ${file.path}:`, metadata ? 'found' : 'not found');
                 
                 if (!metadata) {
                     // No metadata means file was never indexed

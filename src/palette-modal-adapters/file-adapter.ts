@@ -110,7 +110,7 @@ export default class BetterCommandPaletteFileAdapter extends SuggestModalAdapter
 
         // Build the displayed note name without its full path if required in settings
         if (this.plugin.settings.displayOnlyNotesNames) {
-            noteName = match.text.split("/").pop();
+            noteName = match.text.split("/").pop() || match.text;
         }
 
         // Build the displayed note name without its Markdown extension if required in settings
@@ -118,17 +118,31 @@ export default class BetterCommandPaletteFileAdapter extends SuggestModalAdapter
             noteName = noteName.slice(0, -3);
         }
 
+        // Create main title container
         const suggestionEl = content.createEl('div', {
-            cls: 'suggestion-title',
-            text: noteName
+            cls: 'suggestion-title'
         });
 
+        // Add file type indicator
+        this.addFileTypeIndicator(suggestionEl, match.text);
+
+        // Smart path rendering - show folder structure more intelligently
+        if (!this.plugin.settings.displayOnlyNotesNames && match.text.includes('/')) {
+            this.renderSmartPath(suggestionEl, match.text, noteName);
+        } else {
+            suggestionEl.createEl('span', {
+                cls: 'path-part filename',
+                text: noteName
+            });
+        }
+
+        // Add unresolved styling if this is an unresolved link
         if (this.unresolvedItems.has(match)) {
             suggestionEl.addClass('unresolved');
         }
 
+        // Handle aliases
         if (match.id.includes(':')) {
-            // Set Icon will destroy the first element in a node. So we need to add one back
             suggestionEl.createEl('span', {
                 cls: 'suggestion-name',
                 text: match.text,
@@ -143,9 +157,111 @@ export default class BetterCommandPaletteFileAdapter extends SuggestModalAdapter
             });
         }
 
-        content.createEl('div', {
-            cls: 'suggestion-note',
-            text: `${match.tags.join(' ')}`,
+        // Enhanced tag rendering
+        if (match.tags && match.tags.length > 0) {
+            const tagsEl = content.createEl('div', {
+                cls: 'suggestion-note'
+            });
+
+            match.tags.forEach(tag => {
+                if (tag.trim()) {
+                    tagsEl.createEl('span', {
+                        cls: 'tag',
+                        text: tag.startsWith('#') ? tag : `#${tag}`
+                    });
+                }
+            });
+        }
+    }
+
+    /**
+     * Add file type indicator based on file extension
+     */
+    private addFileTypeIndicator(container: HTMLElement, filePath: string): void {
+        const extension = this.getFileExtension(filePath);
+        if (!extension) return;
+
+        let typeClass = 'md';
+        let typeText = 'MD';
+
+        switch (extension.toLowerCase()) {
+            case 'md':
+                typeClass = 'md';
+                typeText = 'MD';
+                break;
+            case 'txt':
+                typeClass = 'txt';
+                typeText = 'TXT';
+                break;
+            case 'pdf':
+                typeClass = 'pdf';
+                typeText = 'PDF';
+                break;
+            case 'png':
+            case 'jpg':
+            case 'jpeg':
+            case 'gif':
+            case 'svg':
+                typeClass = 'img';
+                typeText = 'IMG';
+                break;
+            default:
+                typeText = extension.toUpperCase().substring(0, 3);
+        }
+
+        container.createEl('span', {
+            cls: `file-type-indicator ${typeClass}`,
+            text: typeText
+        });
+    }
+
+    /**
+     * Get file extension from path
+     */
+    private getFileExtension(path: string): string | null {
+        const match = path.match(/\.([^.]+)$/);
+        return match ? match[1] : null;
+    }
+
+    /**
+     * Smart path rendering that emphasizes filename while showing context
+     */
+    private renderSmartPath(container: HTMLElement, fullPath: string, displayName: string): void {
+        const parts = fullPath.split('/');
+        
+        if (parts.length > 2) {
+            // Show first folder
+            container.createEl('span', {
+                cls: 'path-part folder',
+                text: parts[0] + '/'
+            });
+
+            // Show ellipsis if there are middle parts
+            if (parts.length > 3) {
+                container.createEl('span', {
+                    cls: 'path-part folder',
+                    text: '…/'
+                });
+            }
+
+            // Show parent folder
+            if (parts.length > 2) {
+                container.createEl('span', {
+                    cls: 'path-part folder',
+                    text: parts[parts.length - 2] + '/'
+                });
+            }
+        } else if (parts.length === 2) {
+            container.createEl('span', {
+                cls: 'path-part folder',
+                text: parts[0] + '/'
+            });
+        }
+
+        // Show filename with emphasis
+        container.createEl('span', {
+            cls: 'path-part filename',
+            text: displayName
         });
     }
 
