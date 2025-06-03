@@ -59,7 +59,8 @@ export class SemanticSearchModal extends SuggestModal<SemanticMatch> {
 
   getSuggestions(query: string): SemanticMatch[] {
     if (!query || query.length < 3) {
-      return [];
+      // Show helpful suggestions when no query provided
+      return this.getDefaultSuggestions();
     }
 
     // If same query and not searching, return cached results
@@ -77,6 +78,76 @@ export class SemanticSearchModal extends SuggestModal<SemanticMatch> {
     
     // Return current results (may be empty on first search)
     return this.currentResults;
+  }
+
+  /**
+   * Get default suggestions when no query is provided
+   * Shows recently accessed and recently modified files
+   */
+  private getDefaultSuggestions(): SemanticMatch[] {
+    const suggestions: SemanticMatch[] = [];
+    const processedPaths = new Set<string>();
+
+    try {
+      // Get recently opened files from workspace
+      const recentFiles = this.app.workspace.getLastOpenFiles()
+        .slice(0, 8) // Limit to 8 most recent
+        .map(path => this.app.vault.getAbstractFileByPath(path))
+        .filter((file): file is TFile => file instanceof TFile);
+
+      // Add recent files as suggestions
+      for (const file of recentFiles) {
+        if (processedPaths.has(file.path)) continue;
+        processedPaths.add(file.path);
+
+        suggestions.push({
+          id: file.path,
+          text: file.basename,
+          similarity: 1.0, // High relevance for recent files
+          file: file,
+          matches: {
+            titleMatch: false,
+            tagMatch: false,
+            recentlyModified: this.isRecentlyModified(file)
+          }
+        });
+      }
+
+      // Fill remaining slots with recently modified files if we have space
+      if (suggestions.length < 10) {
+        const allFiles = this.app.vault.getMarkdownFiles()
+          .filter(file => !processedPaths.has(file.path))
+          .sort((a, b) => b.stat.mtime - a.stat.mtime) // Sort by modification time
+          .slice(0, 10 - suggestions.length);
+
+        for (const file of allFiles) {
+          suggestions.push({
+            id: file.path,
+            text: file.basename,
+            similarity: 0.8, // Good relevance for recently modified
+            file: file,
+            matches: {
+              titleMatch: false,
+              tagMatch: false,
+              recentlyModified: true
+            }
+          });
+        }
+      }
+
+      return suggestions;
+    } catch (error) {
+      logger.warn('[SemanticSearch] Error getting default suggestions:', error);
+      return [];
+    }
+  }
+
+  /**
+   * Check if file was recently modified (within last 7 days)
+   */
+  private isRecentlyModified(file: TFile): boolean {
+    const daysSince = (Date.now() - file.stat.mtime) / (1000 * 60 * 60 * 24);
+    return daysSince <= 7;
   }
 
   private async performAsyncSearch(query: string): Promise<void> {
@@ -124,54 +195,242 @@ export class SemanticSearchModal extends SuggestModal<SemanticMatch> {
   }
 
   renderSuggestion(match: SemanticMatch, el: HTMLElement): void {
-    // Use the exact same structure as Obsidian's file search modal
+    // Use the exact same structure as the file search modal
     el.addClass('mod-complex');
 
     const suggestionContent = el.createEl('div', 'suggestion-content');
     const suggestionAux = el.createEl('div', 'suggestion-aux');
 
-    // Title - use the same styling as file search
-    const titleEl = suggestionContent.createEl('div', {
-      cls: 'suggestion-title',
-      text: match.text
-    });
+    // Use the same rendering approach as enhanced file adapter
+    this.renderFileSearchStyle(match, suggestionContent);
 
-    // Add file icon (same as file search)
-    const iconEl = titleEl.createEl('span', 'suggestion-flair');
-    setIcon(iconEl, 'document');
-
-    // Excerpt if available (similar to file search note)
-    if (match.excerpt && match.excerpt.trim()) {
-      suggestionContent.createEl('div', {
-        cls: 'suggestion-note',
-        text: match.excerpt
+    // Add context-appropriate indicators in aux section
+    if (match.similarity === 1.0) {
+      // Recent file indicator
+      const recentEl = suggestionAux.createEl('span', {
+        cls: 'suggestion-hotkey recent',
+        text: 'Recent'
       });
+      recentEl.title = 'Recently opened file';
+    } else if (match.similarity === 0.8) {
+      // Recently modified indicator
+      const modifiedEl = suggestionAux.createEl('span', {
+        cls: 'suggestion-hotkey modified',
+        text: 'Modified'
+      });
+      modifiedEl.title = 'Recently modified file';
+    } else {
+      // Semantic similarity score for actual search results
+      const scoreEl = suggestionAux.createEl('span', {
+        cls: 'suggestion-hotkey',
+        text: `${Math.round(match.similarity * 100)}%`
+      });
+      scoreEl.title = `Semantic similarity: ${Math.round(match.similarity * 100)}%`;
     }
 
-    // File path (exactly like file search)
-    const pathEl = suggestionContent.createEl('div', {
-      cls: 'suggestion-note suggestion-note-secondary',
-      text: match.file.path
+    // Add compact match type badges if they exist (for search results)
+    if (match.similarity < 1.0 && match.similarity !== 0.8) {
+      const badges: string[] = [];
+      if (match.matches.titleMatch) badges.push('title');
+      if (match.matches.tagMatch) badges.push('tag');
+      if (match.matches.recentlyModified) badges.push('recent');
+      
+      if (badges.length > 0) {
+        const badgeEl = suggestionAux.createEl('span', {
+          cls: 'suggestion-flair',
+          text: badges.join(' • ')
+        });
+        badgeEl.title = `Matches: ${badges.join(', ')}`;
+      }
+    }
+  }
+
+  /**
+   * Render using the exact same style as file search
+   */
+  private renderFileSearchStyle(match: SemanticMatch, content: HTMLElement): void {
+    let noteName = match.file.basename;
+
+    // Remove .md extension for cleaner display
+    if (noteName.endsWith('.md')) {
+      noteName = noteName.slice(0, -3);
+    }
+
+    // Create main title container
+    const suggestionEl = content.createEl('div', {
+      cls: 'suggestion-title'
     });
 
-    // Similarity score and badges in aux section
-    const scoreEl = suggestionAux.createEl('span', {
-      cls: 'suggestion-hotkey',
-      text: `${Math.round(match.similarity * 100)}%`
-    });
+    // Add file type indicator
+    this.addFileTypeIndicator(suggestionEl, match.file.path);
 
-    // Add match type badges
-    const badges: string[] = [];
-    if (match.matches.titleMatch) badges.push('title');
-    if (match.matches.tagMatch) badges.push('tag');
-    if (match.matches.recentlyModified) badges.push('recent');
+    // Add recently accessed indicator if applicable
+    if (this.isRecentlyAccessed(match)) {
+      suggestionEl.createEl('div', { cls: 'recent-indicator' });
+    }
+
+    // Smart path rendering that emphasizes filename while showing context
+    // Now relies on CSS text-overflow: ellipsis for clipping
+    this.renderSmartPath(suggestionEl, match.file.path, noteName);
+
+    // Enhanced tag rendering (same as file search)
+    const metadata = this.app.metadataCache.getFileCache(match.file);
+    if (metadata?.tags && metadata.tags.length > 0) {
+      const tagsEl = content.createEl('div', {
+        cls: 'suggestion-note'
+      });
+
+      metadata.tags.forEach(tagRef => {
+        if (tagRef.tag.trim()) {
+          tagsEl.createEl('span', {
+            cls: 'tag',
+            text: tagRef.tag
+          });
+        }
+      });
+    }
+  }
+
+  /**
+   * Add file type indicator based on file extension
+   */
+  private addFileTypeIndicator(container: HTMLElement, filePath: string): void {
+    const extension = this.getFileExtension(filePath);
+    if (!extension) return;
+
+    let typeClass = 'md';
+    let typeText = 'MD';
+
+    switch (extension.toLowerCase()) {
+      case 'md':
+        typeClass = 'md';
+        typeText = 'MD';
+        break;
+      case 'txt':
+        typeClass = 'txt';
+        typeText = 'TXT';
+        break;
+      case 'pdf':
+        typeClass = 'pdf';
+        typeText = 'PDF';
+        break;
+      case 'png':
+      case 'jpg':
+      case 'jpeg':
+      case 'gif':
+      case 'svg':
+        typeClass = 'img';
+        typeText = 'IMG';
+        break;
+      default:
+        typeText = extension.toUpperCase().substring(0, 3);
+    }
+
+    container.createEl('span', {
+      cls: `file-type-indicator ${typeClass}`,
+      text: typeText
+    });
+  }
+
+  /**
+   * Get file extension from path
+   */
+  private getFileExtension(path: string): string | null {
+    const match = path.match(/\.([^.]+)$/);
+    return match ? match[1] : null;
+  }
+
+  /**
+   * Smart path rendering that emphasizes filename while showing context
+   * Now relies on CSS text-overflow: ellipsis for clipping
+   */
+  private renderSmartPath(container: HTMLElement, fullPath: string, displayName: string): void {
+    // Simply set the full path and let CSS handle the ellipsis
+    container.textContent = fullPath;
     
-    if (badges.length > 0) {
-      const badgeEl = suggestionAux.createEl('span', {
-        cls: 'suggestion-flair',
-        text: badges.join(' • ')
-      });
+    // Always set the full path as tooltip
+    container.title = fullPath;
+  }
+
+  /**
+   * Render truncated path for secondary display
+   */
+  private renderTruncatedPath(container: HTMLElement, path: string): void {
+    const maxLength = 60;
+    
+    if (path.length <= maxLength) {
+      container.textContent = path;
+      return;
     }
+
+    // Show beginning and end of path
+    const parts = path.split('/');
+    if (parts.length > 3) {
+      const start = parts.slice(0, 2).join('/');
+      const end = parts.slice(-2).join('/');
+      container.innerHTML = `${start}/<span class="path-ellipsis">…</span>/${end}`;
+    } else {
+      // Truncate in the middle
+      const truncated = path.substring(0, 30) + '…' + path.substring(path.length - 25);
+      container.textContent = truncated;
+    }
+    
+    container.title = path;
+  }
+
+  /**
+   * Get display name (removing .md extension if needed)
+   */
+  private getDisplayName(filename: string): string {
+    // Remove .md extension for cleaner display
+    if (filename.endsWith('.md')) {
+      return filename.slice(0, -3);
+    }
+    return filename;
+  }
+
+  /**
+   * Check if file was recently accessed
+   */
+  private isRecentlyAccessed(match: SemanticMatch): boolean {
+    // Consider files modified in the last 24 hours as recent
+    const daysSince = (Date.now() - match.file.stat.mtime) / (1000 * 60 * 60 * 24);
+    return daysSince < 1;
+  }
+
+  /**
+   * Highlight matched terms in text
+   */
+  private highlightMatches(text: string, query: string): string {
+    if (!query || query.length < 2) return this.escapeHtml(text);
+    
+    const escapedText = this.escapeHtml(text);
+    const terms = query.toLowerCase().split(/\s+/).filter(term => term.length >= 2);
+    
+    let highlightedText = escapedText;
+    
+    for (const term of terms) {
+      const regex = new RegExp(`(${this.escapeRegex(term)})`, 'gi');
+      highlightedText = highlightedText.replace(regex, '<span class="snippet-highlight">$1</span>');
+    }
+    
+    return highlightedText;
+  }
+
+  /**
+   * Escape HTML characters
+   */
+  private escapeHtml(text: string): string {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+  }
+
+  /**
+   * Escape regex special characters
+   */
+  private escapeRegex(text: string): string {
+    return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   }
 
   onChooseSuggestion(match: SemanticMatch | null, evt: MouseEvent | KeyboardEvent): void {
@@ -189,22 +448,6 @@ export class SemanticSearchModal extends SuggestModal<SemanticMatch> {
   onOpen(): void {
     logger.debug('[SemanticSearch] Modal opened');
     super.onOpen();
-    
-    // Add a hint when modal opens (similar to file search empty state)
-    const hint = this.resultContainerEl.createEl('div', {
-      cls: 'suggestion-empty',
-      text: 'Type at least 3 characters to start semantic search...'
-    });
-    
-    // Remove hint when user starts typing
-    const removeHint = () => {
-      if (this.inputEl.value.length >= 3) {
-        hint.remove();
-        this.inputEl.removeEventListener('input', removeHint);
-      }
-    };
-    
-    this.inputEl.addEventListener('input', removeHint);
   }
 
   onClose(): void {

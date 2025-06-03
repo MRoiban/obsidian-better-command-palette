@@ -225,44 +225,14 @@ export default class BetterCommandPaletteFileAdapter extends SuggestModalAdapter
 
     /**
      * Smart path rendering that emphasizes filename while showing context
+     * Now relies on CSS text-overflow: ellipsis for clipping
      */
     private renderSmartPath(container: HTMLElement, fullPath: string, displayName: string): void {
-        const parts = fullPath.split('/');
+        // Simply set the full path and let CSS handle the ellipsis
+        container.textContent = fullPath;
         
-        if (parts.length > 2) {
-            // Show first folder
-            container.createEl('span', {
-                cls: 'path-part folder',
-                text: parts[0] + '/'
-            });
-
-            // Show ellipsis if there are middle parts
-            if (parts.length > 3) {
-                container.createEl('span', {
-                    cls: 'path-part folder',
-                    text: '…/'
-                });
-            }
-
-            // Show parent folder
-            if (parts.length > 2) {
-                container.createEl('span', {
-                    cls: 'path-part folder',
-                    text: parts[parts.length - 2] + '/'
-                });
-            }
-        } else if (parts.length === 2) {
-            container.createEl('span', {
-                cls: 'path-part folder',
-                text: parts[0] + '/'
-            });
-        }
-
-        // Show filename with emphasis
-        container.createEl('span', {
-            cls: 'path-part filename',
-            text: displayName
-        });
+        // Always set the full path as tooltip
+        container.title = fullPath;
     }
 
     async onChooseSuggestion(match: Match | null, event?: MouseEvent | KeyboardEvent): Promise<void> {

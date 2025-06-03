@@ -221,27 +221,13 @@ export class SearchResultItem {
 
     /**
      * Render smart path that shows important parts
+     * Now relies on CSS text-overflow: ellipsis for clipping
      */
     private renderSmartPath(container: HTMLElement, path: string): void {
-        const maxLength = 60;
+        // Simply set the full path and let CSS handle the ellipsis
+        container.textContent = path;
         
-        if (path.length <= maxLength) {
-            container.textContent = path;
-            return;
-        }
-
-        // Show beginning and end of path
-        const parts = path.split('/');
-        if (parts.length > 3) {
-            const start = parts.slice(0, 2).join('/');
-            const end = parts.slice(-2).join('/');
-            container.innerHTML = `${start}/<span class="path-ellipsis">…</span>/${end}`;
-        } else {
-            // Truncate in the middle
-            const truncated = path.substring(0, 30) + '…' + path.substring(path.length - 25);
-            container.textContent = truncated;
-        }
-        
+        // Always set the full path as tooltip
         container.title = path;
     }
 
