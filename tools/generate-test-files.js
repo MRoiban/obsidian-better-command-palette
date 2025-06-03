@@ -36,5 +36,4 @@ for (let i = 0; i < argv.count; i += 1) {
     writeFile(fileName, argv.text.replaceAll('{c}', i), () => {});
 }
 
-// eslint-disable-next-line no-console
-console.log(`Created ${argv.count} at ${argv.path}`);
+console.log(`Created ${argv.count} test files at ${argv.path}`);

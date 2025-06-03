@@ -12,6 +12,7 @@ import {
 import { Match, UnsafeAppInterface } from '../types/types';
 import { ActionType } from '../utils/constants';
 import { EnhancedSearchService } from '../search/enhanced-search-service';
+import { logger } from '../utils/logger';
 
 /**
  * Enhanced file adapter that uses the new search system
@@ -113,41 +114,21 @@ export default class EnhancedFileAdapter extends SuggestModalAdapter {
      * Override to use enhanced search when available
      */
     async getSearchResults(query: string): Promise<Match[]> {
-        if (!this.searchService) {
-            // Fallback to simple text filtering if no search service
-            return this.getSortedItems().filter(item => 
-                item.text.toLowerCase().includes(query.toLowerCase())
-            );
+        logger.debug('Enhanced search: getSearchResults called with:', query);
+        
+        const cleanQuery = this.cleanQuery(query);
+        if (cleanQuery.length < 2) {
+            return [];
         }
 
-        try {
-            const cleanQuery = this.cleanQuery(query);
-            console.log('Enhanced search: getSearchResults called with:', cleanQuery);
-            
-            if (!cleanQuery.trim()) {
-                // For empty query, return sorted items
-                return this.getSortedItems();
-            }
-
-            // Use enhanced search service for content search
-            const enhancedResults = await this.searchService.search(cleanQuery, this.plugin.settings.suggestionLimit);
-            console.log('Enhanced search: Found', enhancedResults.length, 'results for query:', cleanQuery);
-            
-            // Convert enhanced results back to Match format for compatibility
-            const matches = enhancedResults.map(result => new PaletteMatch(
-                result.id,
-                result.metadata.path,
-                result.metadata.tags || []
-            ));
-
-            return matches;
-        } catch (error) {
-            console.error('Enhanced search failed in getSearchResults:', error);
-            // Fallback to original search behavior
-            return this.getSortedItems().filter(item => 
-                item.text.toLowerCase().includes(query.toLowerCase())
-            );
-        }
+        const enhancedResults = this.searchService?.search(cleanQuery, 50) || [];
+        logger.debug('Enhanced search: Found', enhancedResults.length, 'results for query:', cleanQuery);
+        
+        return enhancedResults.map(result => new PaletteMatch(
+            result.id,
+            result.metadata.path,
+            result.metadata.tags || []
+        ));
     }
 
     renderSuggestion(match: Match, content: HTMLElement, aux?: HTMLElement): void {
@@ -265,38 +246,52 @@ export default class EnhancedFileAdapter extends SuggestModalAdapter {
      */
     async performEnhancedSearch(query: string): Promise<void> {
         if (!this.searchService) {
-            console.log('Enhanced search: No search service available');
+            logger.debug('Enhanced search: No search service available');
             return;
         }
 
         try {
             const cleanQuery = this.cleanQuery(query);
-            console.log('Enhanced search: Searching for:', cleanQuery);
+            logger.debug('Enhanced search: Searching for:', cleanQuery);
             
-            if (!cleanQuery.trim()) {
-                // For empty query, use all files sorted by recency/usage
-                const allFiles = this.getSortedItems();
-                this.palette.currentSuggestions = allFiles.slice(0, this.plugin.settings.suggestionLimit);
-                this.palette.limit = this.palette.currentSuggestions.length;
-                // Don't call updateSuggestions() here to avoid infinite loop
+            const startTime = Date.now();
+            const enhancedResults = this.searchService.search(cleanQuery, this.plugin.settings.suggestionLimit);
+            const searchTime = Date.now() - startTime;
+            
+            if (enhancedResults.length === 0) {
                 return;
             }
 
-            const enhancedResults = await this.searchService.search(cleanQuery, this.plugin.settings.suggestionLimit);
-            console.log('Enhanced search: Found', enhancedResults.length, 'results');
+            logger.debug('Enhanced search: Found', enhancedResults.length, 'results');
             
-            // Convert enhanced results back to Match format for compatibility
-            const matches = enhancedResults.map(result => new PaletteMatch(
-                result.id,
-                result.metadata.path,
-                result.metadata.tags || []
-            ));
+            const suggestions: Match[] = [];
+            const processedPaths = new Set<string>();
+            
+            for (const result of enhancedResults.slice(0, this.plugin.settings.suggestionLimit)) {
+                if (processedPaths.has(result.metadata.path)) {
+                    continue;
+                }
+                processedPaths.add(result.metadata.path);
+                
+                const file = this.app.vault.getAbstractFileByPath(result.metadata.path) as TFile;
+                if (!file) {
+                    continue;
+                }
+                
+                const suggestion = new PaletteMatch(
+                    result.id,
+                    result.metadata.path,
+                    result.metadata.tags || []
+                );
+                if (suggestion) {
+                    suggestions.push(suggestion);
+                }
+            }
 
-            this.palette.currentSuggestions = matches;
-            this.palette.limit = matches.length;
-            // Don't call updateSuggestions() here to avoid infinite loop
+            this.palette.currentSuggestions = suggestions;
+            this.palette.limit = suggestions.length;
         } catch (error) {
-            console.error('Enhanced search failed:', error);
+            logger.error('Enhanced search: Error during search:', error);
             // Fallback to original search behavior
             this.palette.getSuggestionsAsync(query);
         }

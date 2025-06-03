@@ -13,6 +13,7 @@ import EnhancedFileAdapter from 'src/palette-modal-adapters/enhanced-file-adapte
 import BetterCommandPalettePlugin from 'src/main';
 import { EnhancedSearchService } from 'src/search/enhanced-search-service';
 import { ActionType } from './utils/constants';
+import { logger } from './utils/logger';
 
 class BetterCommandPaletteModal extends SuggestModal<Match> implements UnsafeSuggestModalInterface {
     // Unsafe interface
@@ -378,7 +379,7 @@ class BetterCommandPaletteModal extends SuggestModal<Match> implements UnsafeSug
                 this.getSuggestionsAsync(query);
             }
         } catch (error) {
-            console.error('Enhanced search failed:', error);
+            logger.error('Enhanced search failed:', error);
             // Fallback to worker-based search on error
             this.getSuggestionsAsync(query);
         }
@@ -488,6 +489,38 @@ class BetterCommandPaletteModal extends SuggestModal<Match> implements UnsafeSug
 
     async onChooseSuggestion (item: Match, event: MouseEvent | KeyboardEvent) {
         this.currentAdapter.onChooseSuggestion(item, event);
+    }
+
+    private async performEnhancedSearch(query: string): Promise<void> {
+        try {
+            if (!this.enhancedSearchService) {
+                return;
+            }
+
+            const results = await this.enhancedSearchService.search(query, this.currentLimit);
+            
+            // Convert enhanced results to suggestion format
+            const enhancedSuggestions = results.map(result => ({
+                text: result.metadata.path,
+                score: result.relevanceScore,
+                metadata: result.metadata
+            }));
+
+            // Merge with existing suggestions
+            this.currentSuggestions = [...this.currentSuggestions, ...enhancedSuggestions];
+            
+            // Remove duplicates and sort by score
+            const uniqueSuggestions = this.currentSuggestions.filter((suggestion, index, self) => 
+                index === self.findIndex(s => s.text === suggestion.text)
+            );
+            
+            this.currentSuggestions = uniqueSuggestions
+                .sort((a, b) => (b.score || 0) - (a.score || 0))
+                .slice(0, this.currentLimit);
+
+        } catch (error) {
+            logger.error('Enhanced search failed:', error);
+        }
     }
 }
 

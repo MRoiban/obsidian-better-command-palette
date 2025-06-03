@@ -1,3 +1,5 @@
+import { logger } from '../../src/utils/logger';
+
 const specialKeyCodes: Record<string, number> = {
     Enter: 13,
     Esc: 27,
@@ -37,18 +39,14 @@ export class TestCase {
     async run(): Promise<void> {
         for (let i = 0; i < this.tests.length; i += 1) {
             const [testName, test] = this.tests[i];
-            // eslint-disable-next-line no-console
-            console.log('\t- Running:', testName);
+            logger.info('\t- Running:', testName);
             try {
                 // eslint-disable-next-line no-await-in-loop
                 await test(this);
-                // eslint-disable-next-line no-console
-                console.log('%c\t\tTest Passed', 'color: green');
+                logger.info('%c\t\tTest Passed', 'color: green');
             } catch (e) {
-                // eslint-disable-next-line no-console
-                console.log('%c\t\tTest Failed', 'color: red');
-                // eslint-disable-next-line no-console
-                console.error(e);
+                logger.error('%c\t\tTest Failed', 'color: red');
+                logger.error('\t\tError:', e);
             }
             // eslint-disable-next-line no-await-in-loop
             await wait();
@@ -216,5 +214,20 @@ export class TestCase {
 
     async assertExists(val: any) {
         return this.runCommandWithRetries(this.assertExistsInternal(val));
+    }
+}
+
+export async function runTest(testName: string, testFn: () => Promise<void> | void): Promise<boolean> {
+    try {
+        logger.info('\t- Running:', testName);
+        
+        await testFn();
+        
+        logger.info('%c\t\tTest Passed', 'color: green');
+        return true;
+    } catch (error) {
+        logger.error('%c\t\tTest Failed', 'color: red');
+        logger.error('\t\tError:', error);
+        return false;
     }
 }

@@ -5,6 +5,7 @@
 import { TFile, Vault, MetadataCache } from 'obsidian';
 import { EmbeddingService } from './embedding-service';
 import { SemanticSearchResult, SemanticSearchSettings } from './types';
+import { logger } from '../../utils/logger';
 
 export class SemanticSearchEngine {
   private embeddingService: EmbeddingService;
@@ -28,27 +29,27 @@ export class SemanticSearchEngine {
     const startTime = Date.now();
     const { limit = this.settings.maxResults, threshold = this.settings.searchThreshold, useCache = true } = options;
   
-    console.log(`Semantic search: Starting search for "${query}" (limit: ${limit}, threshold: ${threshold})`);
+    logger.debug(`Semantic search: Starting search for "${query}" (limit: ${limit}, threshold: ${threshold})`);
     
     // Check cache first
     const cacheKey = `${query}:${threshold}:${limit}`;
     if (useCache && this.searchCache.has(cacheKey)) {
-      console.log(`Semantic search: Returning cached results for "${query}"`);
+      logger.debug(`Semantic search: Returning cached results for "${query}"`);
       return this.searchCache.get(cacheKey)!;
     }
 
     const indexedCount = this.embeddingService.getIndexedFileCount();
     if (indexedCount === 0) {
-      console.warn('Semantic search: No files indexed. Please run indexing first.');
+      logger.warn('Semantic search: No files indexed. Please run indexing first.');
       return [];
     }
 
-    console.log(`Semantic search: Searching through ${indexedCount} indexed files`);
+    logger.debug(`Semantic search: Searching through ${indexedCount} indexed files`);
 
     // Generate query embedding
-    console.log(`Semantic search: Generating embedding for query "${query}"`);
+    logger.debug(`Semantic search: Generating embedding for query "${query}"`);
     const queryEmbedding = await this.embeddingService.generateEmbedding(query, 'search_query');
-    console.log(`Semantic search: Query embedding generated (${queryEmbedding.length} dimensions)`);
+    logger.debug(`Semantic search: Query embedding generated (${queryEmbedding.length} dimensions)`);
     
     const results: SemanticSearchResult[] = [];
     const markdownFiles = this.vault.getMarkdownFiles();
@@ -61,7 +62,7 @@ export class SemanticSearchEngine {
       
       if (!docEmbedding) {
         if (checkedFiles % 100 === 0) {
-          console.log(`Semantic search: Progress ${checkedFiles}/${markdownFiles.length} files checked`);
+          logger.debug(`Semantic search: Progress ${checkedFiles}/${markdownFiles.length} files checked`);
         }
         continue;
       }
@@ -74,7 +75,7 @@ export class SemanticSearchEngine {
         const matches = this.analyzeMatches(file, query);
         const excerpt = await this.extractRelevantExcerpt(file, query);
 
-        console.log(`Semantic search: Found match ${file.path} (similarity: ${similarity.toFixed(3)}, relevance: ${relevanceScore.toFixed(3)})`);
+        logger.debug(`Semantic search: Found match ${file.path} (similarity: ${similarity.toFixed(3)}, relevance: ${relevanceScore.toFixed(3)})`);
 
         results.push({
           file,
@@ -87,18 +88,18 @@ export class SemanticSearchEngine {
       }
       
       if (checkedFiles % 100 === 0) {
-        console.log(`Semantic search: Progress ${checkedFiles}/${markdownFiles.length} files checked, ${matchingFiles} matches found`);
+        logger.debug(`Semantic search: Progress ${checkedFiles}/${markdownFiles.length} files checked, ${matchingFiles} matches found`);
       }
     }
 
-    console.log(`Semantic search: Found ${results.length} total matches from ${checkedFiles} files`);
+    logger.debug(`Semantic search: Found ${results.length} total matches from ${checkedFiles} files`);
 
     // Sort by relevance score and limit results
     const sortedResults = results
       .sort((a, b) => b.relevanceScore - a.relevanceScore)
       .slice(0, limit);
 
-    console.log(`Semantic search: Returning top ${sortedResults.length} results (limited from ${results.length})`);
+    logger.debug(`Semantic search: Returning top ${sortedResults.length} results (limited from ${results.length})`);
 
     // Cache results
     if (useCache) {
@@ -108,12 +109,12 @@ export class SemanticSearchEngine {
       if (this.searchCache.size > 100) {
         const firstKey = this.searchCache.keys().next().value;
         this.searchCache.delete(firstKey);
-        console.log(`Semantic search: Cache size limited, removed oldest entry`);
+        logger.debug(`Semantic search: Cache size limited, removed oldest entry`);
       }
     }
 
     const searchTime = Date.now() - startTime;
-    console.log(`Semantic search: Search completed in ${searchTime}ms`);
+    logger.debug(`Semantic search: Search completed in ${searchTime}ms`);
 
     return sortedResults;
   }
@@ -221,7 +222,7 @@ export class SemanticSearchEngine {
 
   clearSearchCache(): void {
     this.searchCache.clear();
-    console.log('Semantic search: Search cache cleared');
+    logger.debug('Semantic search: Search cache cleared');
   }
 
   /**
@@ -231,7 +232,7 @@ export class SemanticSearchEngine {
     this.settings = newSettings;
     // Clear search cache when settings change as threshold/maxResults may have changed
     this.clearSearchCache();
-    console.log('Semantic search: Search engine settings updated');
+    logger.debug('Semantic search: Search engine settings updated');
   }
 
   getCacheStats(): { size: number; maxSize: number } {

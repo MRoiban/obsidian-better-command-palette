@@ -1,7 +1,11 @@
-import { App, TFile } from 'obsidian';
+import { App, TFile, Notice } from 'obsidian';
 import { ContentStore, SearchIndex, UsageTracker, FileMetadata, SearchResult, WorkerMessage, WorkerResponse } from './interfaces';
 import { logger } from '../utils/logger';
 import { generateContentHashHex } from '../utils/hash';
+import { SearchIndexingService } from './search-indexing-service';
+import { FileIndexingWorker } from '../web-workers/file-indexing-worker';
+import { BetterCommandPaletteSettings } from '../types/types';
+import { debounce } from '../utils/debounce';
 
 /**
  * Coordinates background indexing of files using web workers
@@ -25,6 +29,7 @@ export class IndexingCoordinator {
     private debounceMs: number;
     private requestTimeout: number;
     private getFileByPath?: (path: string) => TFile | null;
+    private indexingService: SearchIndexingService;
 
     constructor(
         app: App,
@@ -53,12 +58,12 @@ export class IndexingCoordinator {
      * Initialize the web worker for background processing
      */
     private initializeWorker(): void {
+        logger.debug('IndexingCoordinator: Worker-based indexing is currently disabled, using direct operations');
         try {
             // For now, we'll disable worker usage since the worker setup is complex
             // and instead use direct search index operations
-            console.log('IndexingCoordinator: Worker-based indexing is currently disabled, using direct operations');
         } catch (error) {
-            console.warn('IndexingCoordinator: Failed to initialize worker, using fallback mode:', error);
+            logger.warn('IndexingCoordinator: Failed to initialize worker, using fallback mode:', error);
         }
     }
 
@@ -72,10 +77,10 @@ export class IndexingCoordinator {
 
         try {
             // Since we're not using workers for now, just mark as initialized
-            console.log('IndexingCoordinator: Initializing without worker support');
+            logger.debug('IndexingCoordinator: Initializing without worker support');
             this.isInitialized = true;
         } catch (error) {
-            console.error('Failed to initialize indexing coordinator:', error);
+            logger.error('Failed to initialize indexing coordinator:', error);
             throw error;
         }
     }
@@ -89,7 +94,7 @@ export class IndexingCoordinator {
         };
 
         this.worker.onerror = (error: ErrorEvent) => {
-            console.error('Worker error:', error);
+            logger.error('Worker error:', error);
             this.rejectAllPendingRequests(new Error(`Worker error: ${error.message}`));
         };
 
@@ -160,7 +165,7 @@ export class IndexingCoordinator {
                     throw new Error(`Unknown message type: ${message.type}`);
             }
         } catch (error) {
-            console.error('Direct operation failed:', error);
+            logger.error('Direct operation failed:', error);
             throw error;
         }
     }
@@ -192,12 +197,12 @@ export class IndexingCoordinator {
                 const shouldReindex = await this.shouldReindexFile(file.path, newMetadata);
                 
                 if (!shouldReindex) {
-                    console.log(`Enhanced search: Skipping reindex of ${file.path} - content unchanged`);
+                    logger.debug(`Enhanced search: Skipping reindex of ${file.path} - content unchanged`);
                     this.pendingUpdates.delete(file.path);
                     return;
                 }
 
-                console.log(`Enhanced search: Reindexing ${file.path} due to content changes`);
+                logger.debug(`Enhanced search: Reindexing ${file.path} due to content changes`);
 
                 // Store content for persistence
                 await this.contentStore.set(file.path, fileContent);
@@ -216,7 +221,7 @@ export class IndexingCoordinator {
                 // Trigger debounced callback to notify about the indexing
                 this.debounceCallback(file.path, 'modify');
             } catch (error) {
-                console.error(`Failed to index file ${file.path}:`, error);
+                logger.error(`Failed to index file ${file.path}:`, error);
                 this.pendingUpdates.delete(file.path);
             }
         }, this.debounceMs));
@@ -242,7 +247,7 @@ export class IndexingCoordinator {
                 payload: { id: filePath }
             });
         } catch (error) {
-            console.error(`Failed to remove file ${filePath}:`, error);
+            logger.error(`Failed to remove file ${filePath}:`, error);
             throw error;
         }
     }
@@ -260,7 +265,7 @@ export class IndexingCoordinator {
             // Enhance results with usage data
             return this.enhanceResultsWithUsage(results, query);
         } catch (error) {
-            console.error('Search failed:', error);
+            logger.error('Search failed:', error);
             return [];
         }
     }
@@ -292,7 +297,7 @@ export class IndexingCoordinator {
                 payload: {}
             });
         } catch (error) {
-            console.error('Failed to get index stats:', error);
+            logger.error('Failed to get index stats:', error);
             return { documentCount: 0, indexSize: 0, lastUpdated: 0, version: 'unknown' };
         }
     }
@@ -312,7 +317,7 @@ export class IndexingCoordinator {
                 payload: {}
             });
         } catch (error) {
-            console.error('Failed to clear index:', error);
+            logger.error('Failed to clear index:', error);
             throw error;
         }
     }
@@ -324,7 +329,7 @@ export class IndexingCoordinator {
         try {
             return await this.app.vault.read(file);
         } catch (error) {
-            console.error(`Enhanced search: Failed to read file ${file.path}:`, error);
+            logger.error(`Enhanced search: Failed to read file ${file.path}:`, error);
             return '';
         }
     }
@@ -545,5 +550,39 @@ export class IndexingCoordinator {
             return [aliases];
         }
         return [];
+    }
+
+    private async handleFileChange(file: TFile, changeType: 'create' | 'modify' | 'delete'): Promise<void> {
+        if (!this.shouldReindexFile(file.path, this.extractMetadata(file, await this.readFileContent(file)))) {
+            return;
+        }
+
+        try {
+            // Get current content for comparison
+            const currentContent = changeType === 'delete' ? '' : await this.readFileContent(file);
+            const contentHash = generateContentHashHex(currentContent);
+            
+            // Check if content actually changed
+            const existingMetadata = await this.persistence.getMetadata?.(file.path);
+            if (existingMetadata && existingMetadata.contentHash === contentHash) {
+                logger.debug(`Enhanced search: Skipping reindex of ${file.path} - content unchanged`);
+                return;
+            }
+
+            logger.debug(`Enhanced search: Reindexing ${file.path} due to content changes`);
+            
+            // Perform the indexing operation
+            switch (changeType) {
+                case 'create':
+                case 'modify':
+                    await this.indexFile(file, currentContent);
+                    break;
+                case 'delete':
+                    await this.removeFile(file.path);
+                    break;
+            }
+        } catch (error) {
+            logger.error(`Enhanced search: Failed to handle file change for ${file.path}:`, error);
+        }
     }
 }

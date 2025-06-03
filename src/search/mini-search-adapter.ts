@@ -1,5 +1,6 @@
 import MiniSearch from 'minisearch';
 import { SearchIndex, FileMetadata, SearchResult, IndexStats } from './interfaces';
+import { logger } from '../utils/logger';
 
 /**
  * MiniSearch adapter implementing the SearchIndex interface
@@ -65,7 +66,7 @@ export class MiniSearchAdapter implements SearchIndex {
             this.documents.set(id, metadata);
             this.lastUpdated = Date.now();
         } catch (error) {
-            console.error(`Failed to add document ${id} to search index:`, error);
+            logger.error(`Failed to add document ${id} to search index:`, error);
             throw error;
         }
     }
@@ -83,7 +84,7 @@ export class MiniSearchAdapter implements SearchIndex {
             this.documents.delete(id);
             this.lastUpdated = Date.now();
         } catch (error) {
-            console.error(`Failed to remove document ${id} from search index:`, error);
+            logger.error(`Failed to remove document ${id} from search index:`, error);
             throw error;
         }
     }
@@ -117,7 +118,7 @@ export class MiniSearchAdapter implements SearchIndex {
                 snippet: this.generateSnippet(result.id, query, result.match)
             }));
         } catch (error) {
-            console.error('Search failed:', error);
+            logger.error('Search failed:', error);
             return [];
         }
     }
@@ -316,7 +317,7 @@ export class MiniSearchAdapter implements SearchIndex {
             this.documentCount = data.stats?.documentCount || this.documents.size;
             this.lastUpdated = data.stats?.lastUpdated || Date.now();
         } catch (error) {
-            console.error('Failed to import index:', error);
+            logger.error('Failed to import index:', error);
             throw error;
         }
     }

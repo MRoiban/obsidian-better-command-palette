@@ -5,6 +5,7 @@
 import { App, SuggestModal, setIcon, Notice, TFile } from 'obsidian';
 import BetterCommandPalettePlugin from '../../main';
 import { SemanticSearchResult } from './types';
+import { logger } from '../../utils/logger';
 
 interface SemanticMatch {
   id: string;
@@ -87,16 +88,19 @@ export class SemanticSearchModal extends SuggestModal<SemanticMatch> {
     this.lastQuery = query;
     
     try {
-      console.log('[SemanticSearch] Starting search for:', query);
+      logger.debug('[SemanticSearch] Starting search for:', query);
       const searchEngine = this.plugin.getSemanticSearchEngine();
       if (!searchEngine) {
-        console.warn('[SemanticSearch] Search engine not available');
+        logger.warn('[SemanticSearch] Search engine not available');
         new Notice('Semantic search not available');
         return;
       }
 
+      const startTime = Date.now();
       const results = await searchEngine.search(query);
-      console.log(`[SemanticSearch] Found ${results.length} results`);
+      const searchTime = Date.now() - startTime;
+
+      logger.debug(`[SemanticSearch] Found ${results.length} results`);
       
       const matches = this.convertToMatches(results);
       this.currentResults = matches;
@@ -107,10 +111,13 @@ export class SemanticSearchModal extends SuggestModal<SemanticMatch> {
         this.inputEl.dispatchEvent(new Event('input', { bubbles: true }));
       }
       
+      this.showStatus(`Found ${results.length} results in ${searchTime}ms`, 'success');
+      
     } catch (error) {
-      console.error('[SemanticSearch] Search error:', error);
+      logger.error('[SemanticSearch] Search error:', error);
       new Notice(`Search error: ${error.message}`);
       this.currentResults = [];
+      this.showStatus(`Search failed: ${error.message}`, 'error');
     } finally {
       this.isSearching = false;
     }
@@ -173,15 +180,15 @@ export class SemanticSearchModal extends SuggestModal<SemanticMatch> {
       return;
     }
     
-    console.log('[SemanticSearch] Opening file:', match.file.path);
+    logger.debug('[SemanticSearch] Opening file:', match.file.path);
     // Open the file exactly like in the file search modal
     this.app.workspace.openLinkText(match.file.path, '', false);
     this.close();
   }
 
   onOpen(): void {
+    logger.debug('[SemanticSearch] Modal opened');
     super.onOpen();
-    console.log('[SemanticSearch] Modal opened');
     
     // Add a hint when modal opens (similar to file search empty state)
     const hint = this.resultContainerEl.createEl('div', {
@@ -201,8 +208,8 @@ export class SemanticSearchModal extends SuggestModal<SemanticMatch> {
   }
 
   onClose(): void {
+    logger.debug('[SemanticSearch] Modal closed');
     super.onClose();
-    console.log('[SemanticSearch] Modal closed');
     this.currentResults = [];
     this.isSearching = false;
     this.lastQuery = '';

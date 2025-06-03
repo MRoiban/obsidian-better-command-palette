@@ -1,6 +1,7 @@
 import { App, TFile, Notice } from 'obsidian';
 import { EmbeddingService } from './embedding-service';
 import { SemanticSearchSettings } from './types';
+import { logger } from '../../utils/logger';
 
 /**
  * Coordinates background semantic indexing of files
@@ -32,15 +33,15 @@ export class SemanticIndexingCoordinator {
      * Initialize the semantic indexing coordinator
      */
     async initialize(): Promise<void> {
+        logger.info('SemanticIndexingCoordinator: Initializing semantic indexing coordination');
         if (this.isInitialized) {
             return;
         }
 
         try {
-            console.log('SemanticIndexingCoordinator: Initializing semantic indexing coordination');
             this.isInitialized = true;
         } catch (error) {
-            console.error('Failed to initialize semantic indexing coordinator:', error);
+            logger.error('Failed to initialize semantic indexing coordinator:', error);
             throw error;
         }
     }
@@ -48,36 +49,34 @@ export class SemanticIndexingCoordinator {
     /**
      * Check if auto-indexing should be triggered and start it if needed
      */
-    async checkAndAutoIndex(): Promise<void> {
+    async checkForAutoIndexing(): Promise<void> {
+        logger.debug('Semantic indexing: Checking if auto-indexing is needed...');
+        
         try {
-            console.log('Semantic indexing: Checking if auto-indexing is needed...');
+            const indexedCount = this.embeddingService.getIndexedFileCount();
             
-            // Small delay to ensure all vault files are properly loaded
-            await new Promise(resolve => setTimeout(resolve, 1000));
-            
-            if (this.embeddingService.getIndexedFileCount() === 0) {
-                console.log('Semantic indexing: No files indexed, checking connection and starting auto-indexing...');
+            if (indexedCount === 0) {
+                logger.info('Semantic indexing: No files indexed, checking connection and starting auto-indexing...');
                 
-                const isConnected = await this.embeddingService.checkConnection();
-                if (isConnected) {
-                    new Notice('Auto-indexing files for semantic search...', 3000);
-                    console.log('Semantic indexing: Starting auto-indexing of all files');
-                    
-                    // Start indexing in the background without blocking
+                // Check if Ollama is available before auto-indexing
+                const isAvailable = await this.embeddingService.checkOllamaConnection();
+                if (isAvailable) {
+                    logger.info('Semantic indexing: Starting auto-indexing of all files');
                     await this.indexAllFiles();
                 } else {
-                    console.log('Semantic indexing: Ollama not available, skipping auto-indexing');
-                    new Notice(
-                        'Ollama not available. Semantic search disabled.\nInstall Ollama and run: ollama pull nomic-embed-text',
-                        8000
-                    );
+                    logger.warn('Semantic indexing: Ollama not available, skipping auto-indexing');
                 }
             } else {
-                const indexedCount = this.embeddingService.getIndexedFileCount();
-                console.log(`Semantic indexing: ${indexedCount} files already indexed, no auto-indexing needed`);
+                // Check if we have a reasonable number of files indexed
+                const markdownFiles = this.embeddingService.getMarkdownFiles();
+                const threshold = Math.min(markdownFiles.length * 0.8, 50); // 80% or 50 files max
+                
+                if (indexedCount < threshold && markdownFiles.length > 10) {
+                    logger.info(`Semantic indexing: ${indexedCount} files already indexed, no auto-indexing needed`);
+                }
             }
         } catch (error) {
-            console.error('Semantic indexing: Error during auto-index check:', error);
+            logger.error('Semantic indexing: Error in auto-indexing check:', error);
         }
     }
 
@@ -86,7 +85,7 @@ export class SemanticIndexingCoordinator {
      */
     async indexAllFiles(onProgress?: (current: number, total: number) => void): Promise<void> {
         if (this.isIndexing) {
-            console.log('Semantic indexing: Indexing already in progress, skipping');
+            logger.debug('Semantic indexing: Indexing already in progress, skipping');
             return;
         }
 
@@ -94,12 +93,12 @@ export class SemanticIndexingCoordinator {
         this.onProgressCallback = onProgress;
 
         try {
-            console.log('Semantic indexing: Starting coordinated indexing of all files');
+            logger.info('Semantic indexing: Starting coordinated indexing of all files');
             
             await this.embeddingService.indexAllFiles((current, total) => {
                 // Update progress occasionally without blocking UI
                 if (current % 5 === 0 || current === total) {
-                    console.log(`Semantic indexing: Progress ${current}/${total} files`);
+                    logger.debug(`Semantic indexing: Progress ${current}/${total} files`);
                 }
                 
                 if (this.onProgressCallback) {
@@ -108,11 +107,11 @@ export class SemanticIndexingCoordinator {
             });
 
             const indexedCount = this.embeddingService.getIndexedFileCount();
-            console.log(`Semantic indexing: Completed, ${indexedCount} files indexed`);
+            logger.info(`Semantic indexing: Completed, ${indexedCount} files indexed`);
             new Notice(`✅ Semantic search: Successfully indexed ${indexedCount} files`, 3000);
 
         } catch (error) {
-            console.error('Semantic indexing: Failed:', error);
+            logger.error('Semantic indexing: Failed:', error);
             new Notice(`❌ Semantic search indexing failed: ${error.message}`, 5000);
             throw error;
         } finally {
@@ -126,7 +125,7 @@ export class SemanticIndexingCoordinator {
      */
     async indexFile(file: TFile): Promise<void> {
         if (!this.isInitialized) {
-            console.warn('Semantic indexing: Coordinator not initialized, skipping file indexing');
+            logger.warn('Semantic indexing: Coordinator not initialized, skipping file indexing');
             return;
         }
 
@@ -138,22 +137,21 @@ export class SemanticIndexingCoordinator {
         // Debounce the update - semantic indexing is more expensive
         this.pendingUpdates.set(file.path, setTimeout(async () => {
             try {
-                console.log(`Semantic indexing: Processing file ${file.path}`);
+                logger.debug(`Semantic indexing: Processing file ${file.path}`);
                 
-                // Check if file should be excluded
                 if (this.embeddingService.shouldExcludeFile(file)) {
-                    console.log(`Semantic indexing: Skipping excluded file ${file.path}`);
+                    logger.debug(`Semantic indexing: Skipping excluded file ${file.path}`);
                     this.pendingUpdates.delete(file.path);
                     return;
                 }
 
                 await this.embeddingService.indexFile(file);
-                console.log(`Semantic indexing: Successfully indexed ${file.path}`);
+                logger.debug(`Semantic indexing: Successfully indexed ${file.path}`);
                 
                 this.pendingUpdates.delete(file.path);
                 
             } catch (error) {
-                console.error(`Semantic indexing: Failed to index file ${file.path}:`, error);
+                logger.error(`Semantic indexing: Failed to index file ${file.path}:`, error);
                 this.pendingUpdates.delete(file.path);
             }
         }, this.debounceMs));
@@ -170,10 +168,10 @@ export class SemanticIndexingCoordinator {
         }
 
         try {
-            console.log(`Semantic indexing: Removing file ${filePath}`);
-            this.embeddingService.removeFromCache(filePath);
+            logger.debug(`Semantic indexing: Removing file ${filePath}`);
+            this.embeddingService.removeEmbedding(filePath);
         } catch (error) {
-            console.error(`Semantic indexing: Failed to remove file ${filePath}:`, error);
+            logger.error(`Semantic indexing: Error removing file ${filePath}:`, error);
             throw error;
         }
     }
@@ -181,21 +179,20 @@ export class SemanticIndexingCoordinator {
     /**
      * Handle file rename operations
      */
-    async renameFile(oldPath: string, newPath: string): Promise<void> {
+    async handleFileRename(oldPath: string, newPath: string): Promise<void> {
         try {
-            console.log(`Semantic indexing: Handling file rename from ${oldPath} to ${newPath}`);
+            logger.debug(`Semantic indexing: Handling file rename from ${oldPath} to ${newPath}`);
             
-            // Remove old file from cache
-            await this.removeFile(oldPath);
+            // Remove old embedding and index new file
+            this.embeddingService.removeEmbedding(oldPath);
             
-            // Index the file at its new location
-            const file = this.app.vault.getAbstractFileByPath(newPath) as TFile;
-            if (file && file.extension === 'md') {
+            // Find the new file and index it
+            const file = this.embeddingService.getFileByPath(newPath);
+            if (file) {
                 await this.indexFile(file);
             }
         } catch (error) {
-            console.error(`Semantic indexing: Failed to handle file rename from ${oldPath} to ${newPath}:`, error);
-            throw error;
+            logger.error(`Semantic indexing: Error handling file rename from ${oldPath} to ${newPath}:`, error);
         }
     }
 
@@ -204,19 +201,16 @@ export class SemanticIndexingCoordinator {
      */
     async forceReindexFile(file: TFile): Promise<void> {
         try {
-            console.log(`Semantic indexing: Force reindexing file ${file.path}`);
+            logger.debug(`Semantic indexing: Force reindexing file ${file.path}`);
             
-            // Cancel any pending updates
-            if (this.pendingUpdates.has(file.path)) {
-                clearTimeout(this.pendingUpdates.get(file.path)!);
-                this.pendingUpdates.delete(file.path);
-            }
-
-            await this.embeddingService.indexFile(file);
-            console.log(`Semantic indexing: Successfully force reindexed ${file.path}`);
+            // Remove existing embedding first
+            this.embeddingService.removeEmbedding(file.path);
             
+            // Then reindex
+            await this.indexFile(file);
+            logger.debug(`Semantic indexing: Successfully force reindexed ${file.path}`);
         } catch (error) {
-            console.error(`Semantic indexing: Failed to force reindex file ${file.path}:`, error);
+            logger.error(`Semantic indexing: Error force reindexing file ${file.path}:`, error);
             throw error;
         }
     }
@@ -237,17 +231,17 @@ export class SemanticIndexingCoordinator {
      */
     async clearIndex(): Promise<void> {
         try {
-            console.log('Semantic indexing: Clearing entire index');
+            logger.info('Semantic indexing: Clearing entire index');
             
-            // Cancel all pending updates
-            this.pendingUpdates.forEach(timeout => clearTimeout(timeout));
-            this.pendingUpdates.clear();
-
-            this.embeddingService.clearCache();
+            // Stop any ongoing indexing
+            this.isIndexing = false;
             
-            console.log('Semantic indexing: Index cleared successfully');
+            // Clear the embedding service index
+            await this.embeddingService.clearAllEmbeddings();
+            
+            logger.info('Semantic indexing: Index cleared successfully');
         } catch (error) {
-            console.error('Semantic indexing: Failed to clear index:', error);
+            logger.error('Semantic indexing: Error clearing index:', error);
             throw error;
         }
     }
@@ -264,21 +258,19 @@ export class SemanticIndexingCoordinator {
      */
     async shutdown(): Promise<void> {
         try {
-            console.log('Semantic indexing: Shutting down coordinator');
+            logger.info('Semantic indexing: Shutting down coordinator');
             
-            // Cancel all pending updates
-            this.pendingUpdates.forEach(timeout => clearTimeout(timeout));
-            this.pendingUpdates.clear();
+            // Stop any ongoing indexing
+            this.isIndexing = false;
             
-            // Save the embedding cache
+            // Clean up the embedding service
             if (this.embeddingService) {
                 await this.embeddingService.saveCache();
             }
             
-            this.isInitialized = false;
-            console.log('Semantic indexing: Coordinator shutdown complete');
+            logger.info('Semantic indexing: Coordinator shutdown complete');
         } catch (error) {
-            console.error('Semantic indexing: Error during shutdown:', error);
+            logger.error('Semantic indexing: Error during shutdown:', error);
         }
     }
 
@@ -287,6 +279,7 @@ export class SemanticIndexingCoordinator {
      */
     updateSettings(newSettings: SemanticSearchSettings): void {
         this.settings = newSettings;
-        console.log('Semantic indexing: Coordinator settings updated');
+        this.embeddingService.updateSettings(newSettings);
+        logger.debug('Semantic indexing: Coordinator settings updated');
     }
 } 

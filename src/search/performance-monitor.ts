@@ -2,6 +2,8 @@
  * Performance monitoring for the enhanced search system
  * Tracks search latency, memory usage, and system health
  */
+import { logger } from '../utils/logger';
+
 export class SearchPerformanceMonitor {
     private searchLatencies: number[] = [];
     private indexingLatencies: number[] = [];
@@ -22,7 +24,7 @@ export class SearchPerformanceMonitor {
     endTiming(operationId: string, operationType: 'search' | 'indexing' = 'search'): number {
         const startTime = this.performanceMarks.get(operationId);
         if (!startTime) {
-            console.warn(`No start time found for operation: ${operationId}`);
+            logger.warn(`No start time found for operation: ${operationId}`);
             return 0;
         }
 

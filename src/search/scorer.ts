@@ -1,4 +1,6 @@
 import { RankingContext, SearchSettings } from './interfaces';
+import { UsageTracker, FileMetadata } from './interfaces';
+import { logger } from '../utils/logger';
 
 /**
  * Content search scorer implementing BM25F-style relevance scoring
@@ -101,23 +103,23 @@ export class ContentSearchScorer {
         const tolerance = 0.01;
         
         if (Math.abs(weightSum - 1.0) > tolerance) {
-            console.warn(`Score weights sum to ${weightSum.toFixed(3)}, expected ~1.0`);
+            logger.warn(`Score weights sum to ${weightSum.toFixed(3)}, expected ~1.0`);
         }
 
         // Ensure individual weights are in valid range
         Object.entries(scoreWeights).forEach(([key, value]) => {
             if (value < 0 || value > 1) {
-                console.warn(`Score weight ${key} is ${value}, should be between 0 and 1`);
+                logger.warn(`Score weight ${key} is ${value}, should be between 0 and 1`);
             }
         });
 
         // Ensure other settings are reasonable
         if (this.settings.recencyHalfLife <= 0) {
-            console.warn('Recency half-life should be positive');
+            logger.warn('Recency half-life should be positive');
         }
 
         if (this.settings.maxUsageScore <= 0) {
-            console.warn('Max usage score should be positive');
+            logger.warn('Max usage score should be positive');
         }
     }
 

@@ -1,4 +1,5 @@
-import { UsageTracker } from './interfaces';
+import { UsageTracker, UsageData } from './interfaces';
+import { logger } from '../utils/logger';
 
 /**
  * Usage tracker implementation that monitors file access patterns
@@ -223,18 +224,19 @@ export class FileUsageTracker implements UsageTracker {
     /**
      * Save data to localStorage
      */
-    private saveToStorage(): void {
+    private async saveToStorage(): Promise<void> {
         try {
-            const data = {
-                fileAccess: Array.from(this.fileAccess.entries()),
-                searchHistory: this.searchHistory,
-                version: '1.0.0',
-                lastSaved: Date.now()
+            const data: StorageData = {
+                version: this.STORAGE_VERSION,
+                fileAccess: Array.from(this.fileAccess.entries()).map(([path, access]) => ({
+                    path,
+                    ...access
+                }))
             };
             
-            localStorage.setItem(this.storageKey, JSON.stringify(data));
+            localStorage.setItem(this.STORAGE_KEY, JSON.stringify(data));
         } catch (error) {
-            console.error('Failed to save usage data to localStorage:', error);
+            logger.error('Failed to save usage data to localStorage:', error);
         }
     }
 
@@ -243,37 +245,31 @@ export class FileUsageTracker implements UsageTracker {
      */
     private loadFromStorage(): void {
         try {
-            const stored = localStorage.getItem(this.storageKey);
+            const stored = localStorage.getItem(this.STORAGE_KEY);
             if (!stored) {
                 return;
             }
-
-            const data = JSON.parse(stored);
             
-            // Validate data structure
-            if (data.version && data.fileAccess && data.searchHistory) {
-                this.fileAccess = new Map(data.fileAccess);
-                this.searchHistory = data.searchHistory || [];
-                
-                // Clean up old search history
-                const oneMonthAgo = Date.now() - (30 * 24 * 60 * 60 * 1000);
-                this.searchHistory = this.searchHistory.filter(
-                    search => search.timestamp > oneMonthAgo
-                );
-                
-                // Clean up stale file access data (older than 6 months)
-                const sixMonthsAgo = Date.now() - (180 * 24 * 60 * 60 * 1000);
-                for (const [path, data] of this.fileAccess.entries()) {
-                    if (data.lastOpened < sixMonthsAgo) {
-                        this.fileAccess.delete(path);
-                    }
+            const data: StorageData = JSON.parse(stored);
+            
+            // Check version compatibility
+            if (data.version !== this.STORAGE_VERSION) {
+                logger.debug('Usage data version mismatch, resetting data');
+                return;
+            }
+            
+            // Load file access data
+            if (data.fileAccess) {
+                for (const item of data.fileAccess) {
+                    this.fileAccess.set(item.path, {
+                        count: item.count,
+                        lastOpened: item.lastOpened,
+                        firstOpened: item.firstOpened
+                    });
                 }
             }
         } catch (error) {
-            console.error('Failed to load usage data from localStorage:', error);
-            // Reset to clean state if data is corrupted
-            this.fileAccess.clear();
-            this.searchHistory = [];
+            logger.error('Failed to load usage data from localStorage:', error);
         }
     }
 
@@ -302,7 +298,7 @@ export class FileUsageTracker implements UsageTracker {
                 throw new Error('Invalid data format');
             }
         } catch (error) {
-            console.error('Failed to import usage data:', error);
+            logger.error('Failed to import usage data:', error);
             throw error;
         }
     }
@@ -319,5 +315,34 @@ export class FileUsageTracker implements UsageTracker {
             searchHistorySize,
             totalSize: fileAccessSize + searchHistorySize
         };
+    }
+
+    /**
+     * Import usage data
+     */
+    async importUsageData(data: any): Promise<void> {
+        try {
+            if (!data || typeof data !== 'object') {
+                throw new Error('Invalid usage data format');
+            }
+            
+            // Import file access data
+            if (data.fileAccess && Array.isArray(data.fileAccess)) {
+                for (const item of data.fileAccess) {
+                    if (item.path && typeof item.path === 'string') {
+                        this.fileAccess.set(item.path, {
+                            count: item.count || 0,
+                            lastOpened: item.lastOpened || Date.now(),
+                            firstOpened: item.firstOpened || Date.now()
+                        });
+                    }
+                }
+            }
+            
+            await this.saveToStorage();
+        } catch (error) {
+            logger.error('Failed to import usage data:', error);
+            throw error;
+        }
     }
 }

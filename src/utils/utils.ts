@@ -1,6 +1,6 @@
 import {
     App, Command, Hotkey, Modifier, normalizePath, parseFrontMatterAliases,
-    parseFrontMatterTags, Platform, TFile,
+    parseFrontMatterTags, Platform, TFile, TFolder
 } from 'obsidian';
 import { BetterCommandPalettePluginSettings } from 'src/settings';
 import { Match, UnsafeMetadataCacheInterface } from 'src/types/types';
@@ -9,6 +9,7 @@ import OrderedSet from './ordered-set';
 import {
     BASIC_MODIFIER_ICONS, HYPER_KEY_MODIFIERS_SET, MAC_MODIFIER_ICONS, SPECIAL_KEYS,
 } from './constants';
+import { logger } from './logger';
 
 /**
  * Determines if the modifiers of a hotkey could be a hyper key command.
@@ -107,7 +108,7 @@ export async function getOrCreateFile(app: App, path: string): Promise<TFile> {
             } catch (e) {
                 // Only ignore "folder already exists" errors
                 if (!e.message?.includes('already exists') && !e.message?.includes('Folder already exists')) {
-                    console.error('Failed to create directory:', e);
+                    logger.error('Failed to create directory:', e);
                     throw new Error(`Could not create directory: ${dirOnlyPath}`);
                 }
             }
@@ -117,7 +118,7 @@ export async function getOrCreateFile(app: App, path: string): Promise<TFile> {
         try {
             file = await app.vault.create(normalizedPath, '');
         } catch (e) {
-            console.error('Failed to create file:', e);
+            logger.error('Failed to create file:', e);
             throw new Error(`Could not create file: ${normalizedPath}. ${e.message || 'Unknown error'}`);
         }
     }
@@ -185,4 +186,29 @@ export function createPaletteMatchesFromFilePath (
             tags,
         )),
     ];
+}
+
+export async function createFolderIfNotExists(app: App, folderPath: string): Promise<void> {
+    try {
+        const folder = app.vault.getAbstractFileByPath(folderPath);
+        if (!folder) {
+            await app.vault.createFolder(folderPath);
+        }
+    } catch (e) {
+        logger.error('Failed to create directory:', e);
+        throw e;
+    }
+}
+
+export async function createFileIfNotExists(app: App, filePath: string, content: string = ''): Promise<TFile> {
+    try {
+        let file = app.vault.getAbstractFileByPath(filePath) as TFile;
+        if (!file) {
+            file = await app.vault.create(filePath, content);
+        }
+        return file;
+    } catch (e) {
+        logger.error('Failed to create file:', e);
+        throw e;
+    }
 }

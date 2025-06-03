@@ -5,12 +5,13 @@ import * as fuzzySearch from 'fuzzysort';
 import { Message } from 'src/types/types';
 import { matchTag } from 'src/utils';
 import { QUERY_OR, QUERY_TAG } from 'src/utils/constants';
+import { logger } from '../utils/logger';
 
 self.onmessage = (msg: MessageEvent) => {
     try {
         // Validate message structure
         if (!msg.data || typeof msg.data !== 'object') {
-            console.warn('Invalid message received by suggestions worker');
+            logger.warn('Invalid message received by suggestions worker');
             self.postMessage([]);
             return;
         }
@@ -19,13 +20,13 @@ self.onmessage = (msg: MessageEvent) => {
         
         // Validate input data
         if (!items || !Array.isArray(items)) {
-            console.warn('Invalid items array received by suggestions worker');
+            logger.warn('Invalid items array received by suggestions worker');
             self.postMessage([]);
             return;
         }
 
         if (typeof query !== 'string') {
-            console.warn('Invalid query received by suggestions worker');
+            logger.warn('Invalid query received by suggestions worker');
             self.postMessage([]);
             return;
         }
@@ -50,7 +51,7 @@ self.onmessage = (msg: MessageEvent) => {
         return self.postMessage(results);
         
     } catch (error) {
-        console.error('Worker error:', error);
+        logger.error('Worker error:', error);
         // Always return empty array on error to prevent UI breakage
         self.postMessage([]);
     }

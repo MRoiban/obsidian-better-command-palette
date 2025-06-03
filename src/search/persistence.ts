@@ -1,4 +1,5 @@
 import { ContentStore } from './interfaces';
+import { logger } from '../utils/logger';
 
 /**
  * IndexedDB-based persistence layer for content storage
@@ -412,8 +413,14 @@ export class IndexPersistence implements ContentStore {
             };
             
             deleteRequest.onblocked = () => {
-                console.warn('Database deletion blocked. Close all tabs using this database.');
+                logger.warn('Database deletion blocked. Close all tabs using this database.');
             };
         });
+    }
+
+    private async handleDatabaseBlocked(): Promise<void> {
+        logger.warn('Database deletion blocked. Close all tabs using this database.');
+        // Handle the blocked deletion - could show user notification
+        // For now, we'll just log and continue
     }
 }

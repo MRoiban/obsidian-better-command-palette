@@ -4,6 +4,7 @@ import {
 } from 'src/utils';
 import { Match, UnsafeAppInterface } from 'src/types/types';
 import { ActionType } from 'src/utils/constants';
+import { logger } from '../utils/logger';
 
 export default class BetterCommandPaletteCommandAdapter extends SuggestModalAdapter {
     titleText: string;
@@ -114,25 +115,19 @@ export default class BetterCommandPaletteCommandAdapter extends SuggestModalAdap
         });
     }
 
-    async onChooseSuggestion(match: Match | null) {
-        if (!match) {
-            // Commands don't support creating new items
-            return;
-        }
-        
+    async onChooseSuggestion(match: Match | null, event?: MouseEvent | KeyboardEvent): Promise<void> {
+        if (!match) return;
+
         try {
-            this.getPrevItems().add(match);
-            
-            // Validate command exists before executing
-            const command = this.app.commands.findCommand(match.id);
-            if (!command) {
-                throw new Error(`Command not found: ${match.id}`);
+            const command = this.app.commands.commands[match.id];
+            if (command) {
+                await this.app.commands.executeCommandById(match.id);
+                
+                // Add to previous items
+                this.prevItems.add(match);
             }
-            
-            this.app.commands.executeCommandById(match.id);
         } catch (error) {
-            console.error('Error executing command:', error);
-            new Notice(`Failed to execute command: ${error.message}`);
+            logger.error('Error executing command:', error);
         }
     }
 }

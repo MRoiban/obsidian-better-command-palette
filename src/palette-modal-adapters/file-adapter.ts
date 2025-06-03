@@ -11,6 +11,7 @@ import {
 } from 'src/utils';
 import { Match, UnsafeAppInterface } from 'src/types/types';
 import { ActionType } from 'src/utils/constants';
+import { logger } from '../utils/logger';
 
 export default class BetterCommandPaletteFileAdapter extends SuggestModalAdapter {
     titleText: string;
@@ -148,39 +149,55 @@ export default class BetterCommandPaletteFileAdapter extends SuggestModalAdapter
         });
     }
 
-    async onChooseSuggestion (match: Match | null, event: MouseEvent | KeyboardEvent) {
-        let path = match && match.id;
+    async onChooseSuggestion(match: Match | null, event?: MouseEvent | KeyboardEvent): Promise<void> {
+        if (!match && event) {
+            // Create new file
+            const input = this.palette.inputEl;
+            const filename = this.cleanQuery(input.value);
+
+            if (filename) {
+                try {
+                    const file = await getOrCreateFile(this.app, filename);
+                    if (!file) {
+                        logger.warn('No file was created or found');
+                        return;
+                    }
+                    openFileWithEventKeys(this.app, this.plugin.settings, file, event);
+                } catch (error) {
+                    logger.error('Error choosing file suggestion:', error);
+                }
+            }
+            return;
+        }
+
+        if (!match) return;
+
+        // Handle file or alias selection
+        let filePath = match.text;
+        if (match.id.includes(':')) {
+            const [, path] = match.id.split(':');
+            filePath = path;
+        }
+
+        const file = this.app.vault.getAbstractFileByPath(filePath);
+        if (!file) {
+            new Notice(`File not found: ${filePath}`);
+            return;
+        }
+
+        // Ensure it's a TFile before passing to openFileWithEventKeys
+        if (!(file instanceof TFile)) {
+            new Notice(`Path is not a file: ${filePath}`);
+            return;
+        }
 
         try {
-            // No match means we are trying to create new file
-            if (!match) {
-                const el = event.target as HTMLInputElement;
-                if (!el || !el.value) {
-                    throw new Error('No file path provided');
-                }
-                path = el.value.replace(this.fileSearchPrefix, '');
-            } else if (path.includes(':')) {
-                // If the path is an alias, remove the alias prefix
-                [, path] = path.split(':');
-            }
-
-            if (!path || !path.trim()) {
-                throw new Error('Invalid file path');
-            }
-
-            const file = await getOrCreateFile(this.app, path);
-
-            // We might not have a file if only a directory was specified
-            if (file) {
-                this.getPrevItems().add(match || new PaletteMatch(file.path, file.path));
-                openFileWithEventKeys(this.app, this.plugin.settings, file, event);
-            } else {
-                console.warn('No file was created or found');
-            }
+            openFileWithEventKeys(this.app, this.plugin.settings, file, event);
+            
+            // Add to previous items
+            this.prevItems.add(match);
         } catch (error) {
-            console.error('Error choosing file suggestion:', error);
-            // Show user-friendly error message
-            new Notice(`Failed to open/create file: ${error.message}`);
+            new Notice(`Failed to open file: ${error.message}`);
         }
     }
 }
