@@ -109,6 +109,11 @@ class BetterCommandPaletteModal extends SuggestModal<Match> implements UnsafeSug
             cls: 'better-command-palette-title',
         });
 
+        // If we have an initial input value, we need to set it early so action type detection works
+        if (this.initialInputValue) {
+            this.inputEl.value = this.initialInputValue;
+        }
+
         // Update our action type before adding in our title element so the text is correct
         this.updateActionType();
 
