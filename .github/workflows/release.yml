@@ -37,19 +37,19 @@ jobs:
           npm --version
         continue-on-error: false
 
-      - name: Install dependencies
-        run: npm ci
-        continue-on-error: false
-
       - name: Ensure lockfile is up to date
         run: |
           npm install
           git diff --exit-code package-lock.json || (echo "package-lock.json was out of sync. Please commit the updated lockfile." && exit 1)
         continue-on-error: false
 
+      - name: Install dependencies
+        run: npm ci
+        continue-on-error: false
+
       - name: Lint code
         run: |
-          if [ -f package.json ] && npm run | grep -q 'lint'; then npm run lint; else echo "No lint script"; fi
+          if node -e "const p=require('./package.json');process.exit(p.scripts && p.scripts.lint ? 0 : 1)"; then npm run lint; else echo "No lint script"; fi
         continue-on-error: false
 
       - name: Run tests
@@ -84,13 +84,6 @@ jobs:
           name: ${{ github.ref_name }}
           draft: false
           prerelease: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Upload Release Assets
-        uses: softprops/action-gh-release@v2
-        if: success()
-        with:
           files: |
             ${{ env.PLUGIN_NAME }}.zip
             dist/main.js
