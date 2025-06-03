@@ -209,9 +209,13 @@ class BetterCommandPaletteModal extends SuggestModal<Match> implements UnsafeSug
             // Instead of just setting the query, we need to:
             // 1. Set the input value directly
             this.inputEl.value = this.initialInputValue;
-            // 2. Update the action type based on the prefix
+            // 2. Update the action type based on the prefix BEFORE any suggestions are generated
             this.updateActionType();
-            // 3. Force an immediate suggestion update
+            // 3. Initialize the adapter if needed before updating suggestions
+            if (!this.currentAdapter.initialized) {
+                this.currentAdapter.initialize();
+            }
+            // 4. Force an immediate suggestion update with correct adapter
             this.updateSuggestions();
         }
     }
@@ -381,23 +385,45 @@ class BetterCommandPaletteModal extends SuggestModal<Match> implements UnsafeSug
     }
 
     getSuggestions (query: string): Match[] {
+        // Handle the case where getSuggestions is called before onOpen sets the initial input value
+        // This can happen when the base SuggestModal calls getSuggestions("") immediately upon opening
+        let effectiveQuery = query;
+        if (this.initialInputValue && query === "" && this.inputEl.value !== this.initialInputValue) {
+            // Use the initial input value if the query is empty and input hasn't been set yet
+            effectiveQuery = this.initialInputValue;
+            this.inputEl.value = this.initialInputValue;
+        }
+
         // The action type might have changed
-        this.updateActionType();
+        const actionTypeChanged = this.updateActionType();
 
         // Initialize the adapter if it hasn't been initialized yet
         if (!this.currentAdapter.initialized) {
             this.currentAdapter.initialize();
         }
         
-        const getNewSuggestions = query !== this.lastQuery || this.currentSuggestions.length === 0;
-        this.lastQuery = query;
-        const fixedQuery = this.currentAdapter.cleanQuery(query.trim());
+        const getNewSuggestions = effectiveQuery !== this.lastQuery || this.currentSuggestions.length === 0 || actionTypeChanged;
+        this.lastQuery = effectiveQuery;
+        const fixedQuery = this.currentAdapter.cleanQuery(effectiveQuery.trim());
 
         if (getNewSuggestions) {
+            // If the action type changed, clear current suggestions to avoid showing wrong adapter's results
+            if (actionTypeChanged) {
+                this.currentSuggestions = [];
+            }
+            
             // Check if the adapter supports enhanced search
             if (this.currentAdapter.usesEnhancedSearch && this.currentAdapter.usesEnhancedSearch()) {
                 // Use enhanced search directly
                 this.getEnhancedSearchResults(fixedQuery);
+                
+                // If we don't have suggestions yet and this is an empty/initial query, 
+                // return some initial suggestions from the adapter
+                if (this.currentSuggestions.length === 0) {
+                    this.currentSuggestions = this.currentAdapter
+                        .getSortedItems()
+                        .slice(0, this.suggestionLimit);
+                }
             } else {
                 // Use worker-based search for other adapters
                 this.getSuggestionsAsync(fixedQuery);
@@ -412,7 +438,6 @@ class BetterCommandPaletteModal extends SuggestModal<Match> implements UnsafeSug
 
         this.updateHiddenItemCountHeader(hiddenItemCount);
 
-        // For now return what we currently have. We'll populate results later if we need to
         return this.showHiddenItems ? this.currentSuggestions : visibleItems;
     }
 
