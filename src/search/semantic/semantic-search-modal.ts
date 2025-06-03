@@ -167,7 +167,12 @@ export class SemanticSearchModal extends SuggestModal<SemanticMatch> {
     }
   }
 
-  onChooseSuggestion(match: SemanticMatch, evt: MouseEvent | KeyboardEvent): void {
+  onChooseSuggestion(match: SemanticMatch | null, evt: MouseEvent | KeyboardEvent): void {
+    if (!match) {
+      // Semantic search doesn't support creating new items
+      return;
+    }
+    
     console.log('[SemanticSearch] Opening file:', match.file.path);
     // Open the file exactly like in the file search modal
     this.app.workspace.openLinkText(match.file.path, '', false);

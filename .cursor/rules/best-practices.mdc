@@ -1,0 +1,165 @@
+---
+description: best practices to follow when coding
+globs: 
+alwaysApply: false
+---
+# TypeScript & Code Quality Best Practices
+
+## Code Organization & Architecture
+
+### File Size Limits
+- Split large classes like [enhanced-search-service.ts](mdc:src/search/enhanced-search-service.ts) (851 lines) into smaller, focused modules
+- Extract utility functions into separate files to promote reusability
+
+### Single Responsibility Principle
+- Each class should have one clear responsibility
+- Avoid mixing search logic, caching, and persistence in the same class
+- Consider composition over inheritance where appropriate
+
+## Type Safety
+
+### Avoid `any` Type
+- Replace `any` with proper TypeScript types throughout the codebase
+- Create interfaces for worker messages, API responses, and data structures
+- Use generic constraints instead of `any` for flexible typing
+
+### Proper Interface Design
+```typescript
+// ❌ Avoid
+interface SearchResult {
+    payload: any;
+    metadata: any;
+}
+
+// ✅ Prefer
+interface SearchResult {
+    payload: SearchPayload;
+    metadata: FileMetadata;
+}
+```
+
+## Code Duplication Prevention
+
+### Utility Functions
+- Extract duplicate code into shared utilities (e.g., hash functions found in multiple files)
+- Create a shared [utils/hash.ts](mdc:src/utils/hash.ts) for content hashing
+- Use dependency injection for shared services
+
+### Hash Function Example
+```typescript
+// Create shared utility instead of duplicating across files
+export function generateContentHash(content: string): string {
+    let hash = 0;
+    for (let i = 0; i < content.length; i++) {
+        const char = content.charCodeAt(i);
+        hash = ((hash << 5) - hash) + char;
+        hash = hash & hash;
+    }
+    return hash.toString(36);
+}
+```
+
+## Production Code Standards
+
+### Logging
+- Remove `console.log`, `console.warn`, `console.error` from production code
+- Implement proper logging system with configurable levels
+- Use debug mode flags for development logging
+
+### Error Handling
+- Implement consistent error handling patterns
+- Create custom error types for different failure scenarios
+- Always handle promise rejections properly
+- Use Result/Either types for operations that can fail
+
+## Performance Best Practices
+
+### Async Operations
+- Use proper cancellation tokens for long-running operations
+- Implement request queuing and throttling for API calls
+- Avoid blocking the main thread with synchronous operations
+
+### Memory Management
+- Clear intervals and timeouts in cleanup methods
+- Remove event listeners on component destruction
+- Implement proper cache size limits and eviction strategies
+
+## Configuration Standards
+
+### TypeScript Config
+- Use modern ES target (ES2020+) in [tsconfig.json](mdc:tsconfig.json)
+- Enable strict mode flags: `"strict": true, "noUnusedLocals": true, "noUnusedParameters": true`
+- Include proper library references for your target environment
+
+### Dependencies
+- Keep dependencies up to date, especially TypeScript (currently 4.4.4, should be 5.x+)
+- Remove unused dependencies from [package.json](mdc:package.json)
+- Use exact versions for critical dependencies
+
+## Code Comments & Documentation
+
+### Technical Debt Management
+- Address TODO comments within sprint cycles or remove them
+- Document architectural decisions and trade-offs
+- Keep README and documentation up to date
+
+### Code Comments
+```typescript
+// ❌ Avoid explaining what code does
+// Increment counter by 1
+counter++;
+
+// ✅ Explain why and provide context  
+// Batch processing prevents UI blocking for large file sets
+if (files.length > 100) {
+    return this.processBatches(files);
+}
+```
+
+## Testing Standards
+
+### Test Organization
+- Organize tests in [test/](mdc:test) directory structure matching source
+- Write unit tests for utility functions and core logic
+- Include edge case testing for error conditions
+
+### Mocking
+- Mock external dependencies properly
+- Use dependency injection to make testing easier
+- Test error paths and failure scenarios
+
+## Security Considerations
+
+### Input Validation
+- Validate all user inputs and file paths
+- Sanitize data before persistence or display
+- Use type guards for runtime type checking
+
+### File Operations
+- Validate file paths to prevent directory traversal
+- Handle file access permissions gracefully
+- Implement proper error handling for file system operations
+
+## Plugin-Specific Guidelines
+
+### Obsidian API Usage
+- Use official Obsidian types from [types/types.d.ts](mdc:src/types/types.d.ts)
+- Avoid accessing private/undocumented APIs when possible
+- Handle plugin lifecycle events properly (onload/onunload)
+
+### Settings Management
+- Validate settings on load in [settings.ts](mdc:src/settings.ts)
+- Provide sensible defaults for all configuration options
+- Implement settings migration for version updates
+
+## Build & Deployment
+
+### Build Configuration
+- Use [rollup.config.js](mdc:rollup.config.js) for production builds
+- Enable source maps for debugging
+- Implement proper minification and tree-shaking
+
+### Version Management
+- Follow semantic versioning in [manifest.json](mdc:manifest.json)
+- Update [versions.json](mdc:versions.json) consistently 
+- Test builds before releases

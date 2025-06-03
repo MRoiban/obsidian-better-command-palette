@@ -200,7 +200,7 @@ export default class EnhancedFileAdapter extends SuggestModalAdapter {
         });
     }
 
-    async onChooseSuggestion(match: Match, event?: MouseEvent | KeyboardEvent): Promise<void> {
+    async onChooseSuggestion(match: Match | null, event?: MouseEvent | KeyboardEvent): Promise<void> {
         // Record file access in search service
         if (this.searchService && match) {
             this.searchService.recordFileAccess(match.text);

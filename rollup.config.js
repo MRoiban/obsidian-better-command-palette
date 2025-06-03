@@ -55,7 +55,18 @@ export default {
             forceInline: true,
             extensions: ['.ts'],
         }),
-        typescript(),
+        typescript({
+            check: false,
+            typescript: require('typescript'),
+            tsconfigOverride: {
+                compilerOptions: {
+                    declaration: false,
+                    declarationMap: false,
+                    noUnusedLocals: false,
+                    noUnusedParameters: false,
+                }
+            }
+        }),
         isProduction && terser(),
     ],
 };

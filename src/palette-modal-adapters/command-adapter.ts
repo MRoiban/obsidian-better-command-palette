@@ -114,7 +114,12 @@ export default class BetterCommandPaletteCommandAdapter extends SuggestModalAdap
         });
     }
 
-    async onChooseSuggestion(match: Match) {
+    async onChooseSuggestion(match: Match | null) {
+        if (!match) {
+            // Commands don't support creating new items
+            return;
+        }
+        
         try {
             this.getPrevItems().add(match);
             

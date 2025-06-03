@@ -1,5 +1,7 @@
 import { App, TFile } from 'obsidian';
 import { ContentStore, SearchIndex, UsageTracker, FileMetadata, SearchResult, WorkerMessage, WorkerResponse } from './interfaces';
+import { logger } from '../utils/logger';
+import { generateContentHashHex } from '../utils/hash';
 
 /**
  * Coordinates background indexing of files using web workers
@@ -331,14 +333,19 @@ export class IndexingCoordinator {
      * Extract metadata from file and content
      */
     private extractMetadata(file: TFile, content: string): FileMetadata {
-        // This would extract frontmatter, headings, links, etc.
-        // For now, return basic metadata
+        const cache = this.app.metadataCache.getFileCache(file);
+        
         return {
             path: file.path,
             title: this.extractTitle(content) || file.basename,
-            lastModified: file.stat?.mtime || Date.now(),
-            size: file.stat?.size || content.length,
-            contentHash: this.simpleHash(content)
+            headings: cache?.headings?.map(h => ({ heading: h.heading, level: h.level })) || [],
+            frontmatter: cache?.frontmatter || {},
+            tags: cache?.tags?.map(t => t.tag) || [],
+            aliases: this.normalizeAliases(cache?.frontmatter?.aliases),
+            links: cache?.links?.map(l => l.link) || [],
+            size: file.stat.size,
+            lastModified: file.stat.mtime,
+            contentHash: generateContentHashHex(content)
         };
     }
 
@@ -361,19 +368,6 @@ export class IndexingCoordinator {
     }
 
     /**
-     * Simple hash function for content
-     */
-    private simpleHash(content: string): string {
-        let hash = 0;
-        for (let i = 0; i < content.length; i++) {
-            const char = content.charCodeAt(i);
-            hash = ((hash << 5) - hash) + char;
-            hash = hash & hash; // Convert to 32-bit integer
-        }
-        return hash.toString(16);
-    }
-
-    /**
      * Reject all pending requests (cleanup)
      */
     private rejectAllPendingRequests(error: Error): void {
@@ -389,7 +383,7 @@ export class IndexingCoordinator {
      * Ensures proper handling of file edits and modifications
      */
     async scheduleFileUpdate(filePath: string, operation: 'create' | 'modify' | 'delete'): Promise<void> {
-        console.log(`Enhanced search: Scheduling ${operation} operation for ${filePath}`);
+        logger.debug(`Enhanced search: Scheduling ${operation} operation for ${filePath}`);
         
         // For file modifications (edits), ensure we mark it for reindexing
         if (operation === 'modify') {
@@ -464,25 +458,25 @@ export class IndexingCoordinator {
 
             // Compare content hashes to detect changes
             if (existingMetadata.contentHash !== newMetadata.contentHash) {
-                console.log(`Enhanced search: Content hash changed for ${filePath}`);
+                logger.debug(`Enhanced search: Content hash changed for ${filePath}`);
                 return true;
             }
 
             // Compare last modified times
             if (existingMetadata.lastModified !== newMetadata.lastModified) {
-                console.log(`Enhanced search: Last modified time changed for ${filePath}`);
+                logger.debug(`Enhanced search: Last modified time changed for ${filePath}`);
                 return true;
             }
 
             // Compare file sizes
             if (existingMetadata.size !== newMetadata.size) {
-                console.log(`Enhanced search: File size changed for ${filePath}`);
+                logger.debug(`Enhanced search: File size changed for ${filePath}`);
                 return true;
             }
 
             return false;
         } catch (error) {
-            console.warn(`Enhanced search: Error checking if file should be reindexed ${filePath}:`, error);
+            logger.warn(`Enhanced search: Error checking if file should be reindexed ${filePath}:`, error);
             // If we can't determine, err on the side of reindexing
             return true;
         }
@@ -501,7 +495,7 @@ export class IndexingCoordinator {
                 await this.persistence.setMetadata(filePath, indexedMetadata);
             }
         } catch (error) {
-            console.warn(`Enhanced search: Failed to update index metadata for ${filePath}:`, error);
+            logger.warn(`Enhanced search: Failed to update index metadata for ${filePath}:`, error);
         }
     }
 
@@ -518,7 +512,7 @@ export class IndexingCoordinator {
             const fileContent = content || await this.readFileContent(file);
             const metadata = this.extractMetadata(file, fileContent);
 
-            console.log(`Enhanced search: Force reindexing ${file.path}`);
+            logger.debug(`Enhanced search: Force reindexing ${file.path}`);
 
             // Store content for persistence
             await this.contentStore.set(file.path, fileContent);
@@ -535,8 +529,21 @@ export class IndexingCoordinator {
             // Trigger debounced callback to notify about the indexing
             this.debounceCallback(file.path, 'modify');
         } catch (error) {
-            console.error(`Failed to force reindex file ${file.path}:`, error);
+            logger.error(`Failed to force reindex file ${file.path}:`, error);
             throw error;
         }
+    }
+
+    private normalizeAliases(aliases: any): string[] {
+        if (!aliases) {
+            return [];
+        }
+        if (Array.isArray(aliases)) {
+            return aliases.filter(alias => typeof alias === 'string');
+        }
+        if (typeof aliases === 'string') {
+            return [aliases];
+        }
+        return [];
     }
 }

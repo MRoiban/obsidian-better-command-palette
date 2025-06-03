@@ -16,41 +16,41 @@ import { ActionType } from './utils/constants';
 
 class BetterCommandPaletteModal extends SuggestModal<Match> implements UnsafeSuggestModalInterface {
     // Unsafe interface
-    chooser: UnsafeSuggestModalInterface['chooser'];
+    chooser!: UnsafeSuggestModalInterface['chooser'];
 
-    updateSuggestions: UnsafeSuggestModalInterface['updateSuggestions'];
+    updateSuggestions!: UnsafeSuggestModalInterface['updateSuggestions'];
 
-    plugin: BetterCommandPalettePlugin;
+    plugin!: BetterCommandPalettePlugin;
 
-    actionType: ActionType;
+    actionType!: ActionType;
 
-    fileSearchPrefix: string;
+    fileSearchPrefix!: string;
 
-    tagSearchPrefix: string;
+    tagSearchPrefix!: string;
 
-    suggestionsWorker: Worker;
+    suggestionsWorker!: Worker;
 
-    currentSuggestions: Match[];
+    currentSuggestions!: Match[];
 
-    lastQuery: string;
+    lastQuery!: string;
 
-    modalTitleEl: HTMLElement;
+    modalTitleEl!: HTMLElement;
 
-    hiddenItemsHeaderEl: HTMLElement;
+    hiddenItemsHeaderEl!: HTMLElement;
 
-    showHiddenItems: boolean;
+    showHiddenItems!: boolean;
 
-    initialInputValue: string;
+    initialInputValue!: string;
 
-    commandAdapter: BetterCommandPaletteCommandAdapter;
+    commandAdapter!: BetterCommandPaletteCommandAdapter;
 
-    fileAdapter: BetterCommandPaletteFileAdapter | EnhancedFileAdapter;
+    fileAdapter!: BetterCommandPaletteFileAdapter | EnhancedFileAdapter;
 
-    tagAdapter: BetterCommandPaletteTagAdapter;
+    tagAdapter!: BetterCommandPaletteTagAdapter;
 
-    currentAdapter: SuggestModalAdapter;
+    currentAdapter!: SuggestModalAdapter;
 
-    suggestionLimit: number;
+    suggestionLimit!: number;
 
     constructor (
         app: App,
@@ -182,7 +182,8 @@ class BetterCommandPaletteModal extends SuggestModal<Match> implements UnsafeSug
                 if (promptResults && selected) {
                     const selectedIndex = Array.from(promptResults.children).indexOf(selected);
                     if (selectedIndex >= 0 && selectedIndex < this.currentSuggestions.length) {
-                        this.currentAdapter.onChooseSuggestion(this.currentSuggestions[selectedIndex], event);
+                        const selectedMatch = this.currentSuggestions[selectedIndex] || null;
+                        this.currentAdapter.onChooseSuggestion(selectedMatch, event);
                         this.close(event);
                     }
                 }
@@ -450,8 +451,11 @@ class BetterCommandPaletteModal extends SuggestModal<Match> implements UnsafeSug
             event.stopPropagation();
 
             const hideEl = event.target as HTMLElement;
-
-            this.currentAdapter.toggleHideId(hideEl.getAttr('data-id'));
+            const dataId = hideEl.getAttr('data-id');
+            
+            if (dataId) {
+                this.currentAdapter.toggleHideId(dataId);
+            }
         });
 
         this.currentAdapter.renderSuggestion(match, suggestionContent, suggestionAux);

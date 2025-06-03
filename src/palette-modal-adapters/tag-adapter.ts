@@ -66,7 +66,12 @@ export default class BetterCommandPaletteTagAdapter extends SuggestModalAdapter 
         });
     }
 
-    async onChooseSuggestion(match: Match) {
+    async onChooseSuggestion(match: Match | null) {
+        if (!match) {
+            // Tags don't support creating new items
+            return;
+        }
+        
         this.getPrevItems().add(match);
         this.palette.open();
         this.palette.setQuery(`${this.plugin.settings.fileSearchPrefix}${QUERY_TAG}${match.text}`, 1);

@@ -148,7 +148,7 @@ export default class BetterCommandPaletteFileAdapter extends SuggestModalAdapter
         });
     }
 
-    async onChooseSuggestion (match: Match, event: MouseEvent | KeyboardEvent) {
+    async onChooseSuggestion (match: Match | null, event: MouseEvent | KeyboardEvent) {
         let path = match && match.id;
 
         try {

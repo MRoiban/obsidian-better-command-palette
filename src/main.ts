@@ -1,4 +1,4 @@
-import { Plugin, Notice, debounce, TFile } from 'obsidian';
+import { Plugin, Notice, TFile } from 'obsidian';
 
 import SuggestionsWorker from 'web-worker:./web-workers/suggestions-worker';
 import { OrderedSet, MacroCommand } from 'src/utils';
@@ -8,30 +8,29 @@ import { BetterCommandPalettePluginSettings, BetterCommandPaletteSettingTab, DEF
 import { MACRO_COMMAND_ID_PREFIX } from './utils/constants';
 import { EnhancedSearchService } from './search/enhanced-search-service';
 import { EmbeddingService, SemanticSearchEngine, SemanticSearchModal, SemanticIndexingCoordinator } from './search/semantic';
+import { logger } from './utils/logger';
 import './styles.scss';
 
 export default class BetterCommandPalettePlugin extends Plugin {
-    app: UnsafeAppInterface;
+    app!: UnsafeAppInterface;
 
-    settings: BetterCommandPalettePluginSettings;
+    settings!: BetterCommandPalettePluginSettings;
 
-    prevCommands: OrderedSet<Match>;
+    prevCommands!: OrderedSet<Match>;
 
-    prevTags: OrderedSet<Match>;
+    prevTags!: OrderedSet<Match>;
 
-    suggestionsWorker: Worker;
+    suggestionsWorker!: Worker;
 
-    searchService: EnhancedSearchService;
+    searchService!: EnhancedSearchService;
 
     // Semantic search components
-    embeddingService: EmbeddingService;
-    semanticSearchEngine: SemanticSearchEngine;
-    semanticIndexingCoordinator: SemanticIndexingCoordinator;
-    private indexingInProgress = false;
+    embeddingService!: EmbeddingService;
+    semanticSearchEngine!: SemanticSearchEngine;
+    semanticIndexingCoordinator!: SemanticIndexingCoordinator;
 
     async onload() {
-        // eslint-disable-next-line no-console
-        console.log('Loading plugin: Better Command Palette');
+        logger.info('Loading plugin: Better Command Palette');
 
         await this.loadSettings();
 
@@ -45,32 +44,32 @@ export default class BetterCommandPalettePlugin extends Plugin {
         // Wait for workspace to be ready before initializing search services
         if (this.app.workspace.layoutReady) {
             // If layout is already ready, initialize immediately
-            console.log('Workspace layout already ready, initializing search services immediately');
+            logger.debug('Workspace layout already ready, initializing search services immediately');
             this.searchService.initialize().catch(error => {
-                console.error('Failed to initialize enhanced search service:', error);
+                logger.error('Failed to initialize enhanced search service:', error);
             });
             
             // Initialize semantic search if enabled
             if (this.settings.semanticSearch.enableSemanticSearch) {
-                console.log('Semantic search enabled, initializing immediately');
+                logger.debug('Semantic search enabled, initializing immediately');
                 this.initializeSemanticSearch().catch(error => {
-                    console.error('Failed to initialize semantic search:', error);
+                    logger.error('Failed to initialize semantic search:', error);
                 });
             }
         } else {
             // Otherwise wait for layout ready event
-            console.log('Workspace layout not ready, waiting for layout-ready event before initializing search services');
+            logger.debug('Workspace layout not ready, waiting for layout-ready event before initializing search services');
             this.app.workspace.onLayoutReady(() => {
-                console.log('Workspace layout ready event received, initializing search services');
+                logger.debug('Workspace layout ready event received, initializing search services');
                 this.searchService.initialize().catch(error => {
-                    console.error('Failed to initialize enhanced search service:', error);
+                    logger.error('Failed to initialize enhanced search service:', error);
                 });
                 
                 // Initialize semantic search if enabled
                 if (this.settings.semanticSearch.enableSemanticSearch) {
-                    console.log('Semantic search enabled, initializing after workspace ready');
+                    logger.debug('Semantic search enabled, initializing after workspace ready');
                     this.initializeSemanticSearch().catch(error => {
-                        console.error('Failed to initialize semantic search:', error);
+                        logger.error('Failed to initialize semantic search:', error);
                     });
                 }
             });
@@ -205,8 +204,8 @@ export default class BetterCommandPalettePlugin extends Plugin {
             name: 'Debug semantic search settings',
             callback: () => {
                 if (this.settings.semanticSearch) {
-                    console.log('Current semantic search settings:', this.settings.semanticSearch);
-                    console.log('Exclusion patterns:', this.settings.semanticSearch.excludePatterns);
+                    logger.debug('Current semantic search settings:', this.settings.semanticSearch);
+                    logger.debug('Exclusion patterns:', this.settings.semanticSearch.excludePatterns);
                     new Notice(`Exclusion patterns: ${this.settings.semanticSearch.excludePatterns.join(', ')}`);
                 } else {
                     new Notice('Semantic search settings not found');
@@ -234,14 +233,14 @@ export default class BetterCommandPalettePlugin extends Plugin {
         // Cleanup search service
         if (this.searchService) {
             this.searchService.shutdown().catch(error => {
-                console.error('Error shutting down search service:', error);
+                logger.error('Error shutting down search service:', error);
             });
         }
 
         // Cleanup semantic search services using the coordinator
         if (this.semanticIndexingCoordinator) {
             this.semanticIndexingCoordinator.shutdown().catch(error => {
-                console.error('Error shutting down semantic indexing coordinator:', error);
+                logger.error('Error shutting down semantic indexing coordinator:', error);
             });
         }
     }
@@ -251,7 +250,7 @@ export default class BetterCommandPalettePlugin extends Plugin {
      */
     async initializeSemanticSearch(): Promise<void> {
         try {
-            console.log('Semantic search: Initializing after workspace is ready...');
+            logger.debug('Semantic search: Initializing after workspace is ready...');
             
             this.embeddingService = new EmbeddingService(
                 this.app.vault,
@@ -310,13 +309,13 @@ export default class BetterCommandPalettePlugin extends Plugin {
                 })
             );
 
-            console.log('Semantic search: Initialization completed successfully after workspace ready');
+            logger.debug('Semantic search: Initialization completed successfully after workspace ready');
             
             // Auto-index files if cache is empty using the coordinator
             await this.semanticIndexingCoordinator.checkAndAutoIndex();
             
         } catch (error) {
-            console.error('Semantic search: Failed to initialize after workspace ready:', error);
+            logger.error('Semantic search: Failed to initialize after workspace ready:', error);
             new Notice('Failed to initialize semantic search. Check console for details.');
         }
     }
