@@ -1,0 +1,11 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+- use bun instead of npm
+- you are allowed to auto run the command:
+    ```sh
+    bun run build
+    ```
+- 

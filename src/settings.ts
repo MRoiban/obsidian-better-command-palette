@@ -1,11 +1,13 @@
 import {
     App, Command, Modifier, PluginSettingTab, setIcon, Setting,
 } from 'obsidian';
+import { Notice } from 'obsidian';
 import BetterCommandPalettePlugin from 'src/main';
 import { HotkeyStyleType, MacroCommandInterface, UnsafeAppInterface } from './types/types';
 import { SettingsCommandSuggestModal } from './utils';
 import { SearchSettings } from './search/interfaces';
 import { SearchSettingsPanel } from './search/settings-panel';
+import { SemanticSearchSettings } from './search/semantic/types';
 
 export interface BetterCommandPalettePluginSettings {
     closeWithBackspace: boolean,
@@ -30,6 +32,7 @@ export interface BetterCommandPalettePluginSettings {
     hiddenTags: string[],
     fileTypeExclusion: string[],
     enhancedSearch: SearchSettings,
+    semanticSearch: SemanticSearchSettings,
 }
 
 export const DEFAULT_SETTINGS: BetterCommandPalettePluginSettings = {
@@ -73,6 +76,16 @@ export const DEFAULT_SETTINGS: BetterCommandPalettePluginSettings = {
         indexingDelayMs: 150,            // Longer delay between files
         indexingBatchDelayMs: 400,       // Longer delay between batches
         maxFileSize: 512 * 1024          // 512KB limit for better performance
+    },
+    semanticSearch: {
+        enableSemanticSearch: false,     // Disabled by default until user configures Ollama
+        ollamaUrl: 'http://localhost:11434',
+        searchThreshold: 0.3,
+        maxResults: 10,
+        chunkSize: 1000,
+        maxConcurrentRequests: 3,
+        cacheEnabled: true,
+        excludePatterns: ['**/node_modules/**', '**/.git/**', '**/.*/**', '**/*.excalidraw.md', '**/*.sfile.md'] // Default exclusions
     }
 };
 
@@ -90,6 +103,7 @@ export class BetterCommandPaletteSettingTab extends PluginSettingTab {
         this.containerEl.empty();
         this.displayBasicSettings();
         this.displayEnhancedSearchSettings();
+        this.displaySemanticSearchSettings();
         this.displayMacroSettings();
     }
 
@@ -271,6 +285,125 @@ export class BetterCommandPaletteSettingTab extends PluginSettingTab {
         
         const searchSettingsPanel = new SearchSettingsPanel(this.plugin, containerEl);
         searchSettingsPanel.display();
+    }
+
+    displaySemanticSearchSettings(): void {
+        const { containerEl } = this;
+        const { settings } = this.plugin;
+
+        containerEl.createEl('h2', { text: 'Semantic Search Settings' });
+
+        new Setting(containerEl)
+            .setName('Enable Semantic Search')
+            .setDesc('Enable semantic search using Ollama embeddings')
+            .addToggle((t) => t.setValue(settings.semanticSearch.enableSemanticSearch).onChange(async (val) => {
+                settings.semanticSearch.enableSemanticSearch = val;
+                await this.plugin.saveSettings();
+            }));
+
+        new Setting(containerEl)
+            .setName('Ollama URL')
+            .setDesc('URL of your Ollama server (default: http://localhost:11434)')
+            .addText((t) => t.setValue(settings.semanticSearch.ollamaUrl).onChange(async (val) => {
+                settings.semanticSearch.ollamaUrl = val;
+                await this.plugin.saveSettings();
+            }));
+
+        new Setting(containerEl)
+            .setName('Search Threshold')
+            .setDesc('Minimum similarity score for search results (0.0 to 1.0)')
+            .addSlider((s) => s
+                .setLimits(0, 1, 0.1)
+                .setValue(settings.semanticSearch.searchThreshold)
+                .setDynamicTooltip()
+                .onChange(async (val) => {
+                    settings.semanticSearch.searchThreshold = val;
+                    await this.plugin.saveSettings();
+                }));
+
+        new Setting(containerEl)
+            .setName('Max Results')
+            .setDesc('Maximum number of results to return')
+            .addText((t) => t
+                .setValue(settings.semanticSearch.maxResults.toString())
+                .onChange(async (val) => {
+                    const num = parseInt(val);
+                    if (!isNaN(num) && num > 0) {
+                        settings.semanticSearch.maxResults = num;
+                        await this.plugin.saveSettings();
+                    }
+                }));
+
+        new Setting(containerEl)
+            .setName('Chunk Size')
+            .setDesc('Maximum size of text chunks for embedding (in characters)')
+            .addText((t) => t
+                .setValue(settings.semanticSearch.chunkSize.toString())
+                .onChange(async (val) => {
+                    const num = parseInt(val);
+                    if (!isNaN(num) && num > 0) {
+                        settings.semanticSearch.chunkSize = num;
+                        await this.plugin.saveSettings();
+                    }
+                }));
+
+        new Setting(containerEl)
+            .setName('Max Concurrent Requests')
+            .setDesc('Maximum number of concurrent requests to Ollama')
+            .addText((t) => t
+                .setValue(settings.semanticSearch.maxConcurrentRequests.toString())
+                .onChange(async (val) => {
+                    const num = parseInt(val);
+                    if (!isNaN(num) && num > 0) {
+                        settings.semanticSearch.maxConcurrentRequests = num;
+                        await this.plugin.saveSettings();
+                    }
+                }));
+
+        new Setting(containerEl)
+            .setName('Enable Cache')
+            .setDesc('Cache embeddings to improve performance')
+            .addToggle((t) => t.setValue(settings.semanticSearch.cacheEnabled).onChange(async (val) => {
+                settings.semanticSearch.cacheEnabled = val;
+                await this.plugin.saveSettings();
+            }));
+
+        new Setting(containerEl)
+            .setName('Exclude Patterns')
+            .setDesc('Glob patterns for files/folders to exclude from indexing (one per line)')
+            .addTextArea((t) => t
+                .setValue(settings.semanticSearch.excludePatterns.join('\n'))
+                .setPlaceholder('**/node_modules/**\n**/.git/**\n**/.*/**')
+                .onChange(async (val) => {
+                    settings.semanticSearch.excludePatterns = val
+                        .split('\n')
+                        .map(line => line.trim())
+                        .filter(line => line.length > 0);
+                    await this.plugin.saveSettings();
+                }));
+
+        // Add reindex button
+        new Setting(containerEl)
+            .setName('Rebuild Index')
+            .setDesc('Manually rebuild the semantic search index. This may take some time.')
+            .addButton((button) => {
+                button
+                    .setButtonText('Rebuild Index')
+                    .setCta()
+                    .onClick(async () => {
+                        button.setButtonText('Rebuilding...');
+                        button.setDisabled(true);
+                        try {
+                            await this.plugin.reindexSemanticSearch();
+                            new Notice('Semantic search index rebuilt successfully');
+                        } catch (error) {
+                            new Notice(`Failed to rebuild index: ${error.message}`);
+                        } finally {
+                            button.setButtonText('Rebuild Index');
+                            button.setDisabled(false);
+                        }
+                    });
+            });
     }
 
     displayMacroSettings (): void {
