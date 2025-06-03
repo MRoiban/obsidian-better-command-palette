@@ -32,6 +32,7 @@ export class EnhancedSearchService {
         this.scorer = new ContentSearchScorer(settings);
         
         this.indexingCoordinator = new IndexingCoordinator(
+            this.app,
             this.searchIndex,
             this.persistence,
             this.usageTracker,
@@ -55,6 +56,10 @@ export class EnhancedSearchService {
             // Initialize persistence layer
             await this.persistence.initialize();
             console.log('Enhanced search: Persistence initialized');
+
+            // Initialize indexing coordinator
+            await this.indexingCoordinator.initialize();
+            console.log('Enhanced search: IndexingCoordinator initialized');
 
             // Load existing index and usage data
             await this.loadPersistedData();

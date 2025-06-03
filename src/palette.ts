@@ -349,6 +349,34 @@ class BetterCommandPaletteModal extends SuggestModal<Match> implements UnsafeSug
             query,
             items,
         });
+   }
+
+    async getEnhancedSearchResults(query: string) {
+        try {
+            if (this.currentAdapter.getSearchResults) {
+                const results = await this.currentAdapter.getSearchResults(query);
+                
+                // Convert to the format expected by the UI
+                const matches = results.map((r: Match) => new PaletteMatch(r.id, r.text, r.tags));
+                
+                // Sort the suggestions so that previously searched items are first
+                const prevItems = this.currentAdapter.getPrevItems();
+                matches.sort((a, b) => (+prevItems.has(b)) - (+prevItems.has(a)));
+                
+                this.currentSuggestions = matches.slice(0, this.suggestionLimit);
+                this.limit = this.currentSuggestions.length;
+                
+                // Don't call updateSuggestions() here to avoid infinite loop
+                // The UI will be updated when getSuggestions() returns the new currentSuggestions
+            } else {
+                // Fallback to worker-based search if getSearchResults is not available
+                this.getSuggestionsAsync(query);
+            }
+        } catch (error) {
+            console.error('Enhanced search failed:', error);
+            // Fallback to worker-based search on error
+            this.getSuggestionsAsync(query);
+        }
     }
 
     getSuggestions (query: string): Match[] {
@@ -365,8 +393,14 @@ class BetterCommandPaletteModal extends SuggestModal<Match> implements UnsafeSug
         const fixedQuery = this.currentAdapter.cleanQuery(query.trim());
 
         if (getNewSuggestions) {
-            // Always use the worker-based search for now to avoid async issues
-            this.getSuggestionsAsync(fixedQuery);
+            // Check if the adapter supports enhanced search
+            if (this.currentAdapter.usesEnhancedSearch && this.currentAdapter.usesEnhancedSearch()) {
+                // Use enhanced search directly
+                this.getEnhancedSearchResults(fixedQuery);
+            } else {
+                // Use worker-based search for other adapters
+                this.getSuggestionsAsync(fixedQuery);
+            }
         }
 
         const visibleItems = this.currentSuggestions.filter(

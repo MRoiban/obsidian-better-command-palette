@@ -1,4 +1,4 @@
-import { TFile } from 'obsidian';
+import { App, TFile } from 'obsidian';
 import { ContentStore, SearchIndex, UsageTracker, FileMetadata, SearchResult, WorkerMessage, WorkerResponse } from './interfaces';
 
 /**
@@ -6,6 +6,7 @@ import { ContentStore, SearchIndex, UsageTracker, FileMetadata, SearchResult, Wo
  * Handles debouncing, error recovery, and performance monitoring
  */
 export class IndexingCoordinator {
+    private app: App;
     private worker: Worker;
     private searchIndex: SearchIndex;
     private contentStore: ContentStore;
@@ -24,6 +25,7 @@ export class IndexingCoordinator {
     private getFileByPath?: (path: string) => TFile | null;
 
     constructor(
+        app: App,
         searchIndex: SearchIndex,
         contentStore: ContentStore,
         usageTracker: UsageTracker,
@@ -32,6 +34,7 @@ export class IndexingCoordinator {
         debounceMs = 500,
         requestTimeout = 5000
     ) {
+        this.app = app;
         this.searchIndex = searchIndex;
         this.contentStore = contentStore;
         this.usageTracker = usageTracker;
@@ -39,6 +42,22 @@ export class IndexingCoordinator {
         this.debounceCallback = debounceCallback;
         this.debounceMs = debounceMs;
         this.requestTimeout = requestTimeout;
+        
+        // Initialize worker if supported
+        this.initializeWorker();
+    }
+
+    /**
+     * Initialize the web worker for background processing
+     */
+    private initializeWorker(): void {
+        try {
+            // For now, we'll disable worker usage since the worker setup is complex
+            // and instead use direct search index operations
+            console.log('IndexingCoordinator: Worker-based indexing is currently disabled, using direct operations');
+        } catch (error) {
+            console.warn('IndexingCoordinator: Failed to initialize worker, using fallback mode:', error);
+        }
     }
 
     /**
@@ -50,8 +69,8 @@ export class IndexingCoordinator {
         }
 
         try {
-            // Test worker communication
-            await this.sendWorkerMessage({ type: 'GET_STATS', payload: {} });
+            // Since we're not using workers for now, just mark as initialized
+            console.log('IndexingCoordinator: Initializing without worker support');
             this.isInitialized = true;
         } catch (error) {
             console.error('Failed to initialize indexing coordinator:', error);
@@ -99,24 +118,49 @@ export class IndexingCoordinator {
 
     /**
      * Send a message to the worker and wait for response
+     * Currently using direct operations instead of worker
      */
     private async sendWorkerMessage(message: WorkerMessage): Promise<any> {
-        if (!this.isInitialized && message.type !== 'GET_STATS') {
+        if (!this.isInitialized) {
             throw new Error('IndexingCoordinator not initialized');
         }
 
-        const requestId = this.generateRequestId();
-        const messageWithId: WorkerMessage = { ...message, requestId };
+        // Since we're not using workers, handle operations directly
+        try {
+            switch (message.type) {
+                case 'INDEX_FILE':
+                    await this.searchIndex.addDocument(
+                        message.payload.id,
+                        message.payload.content,
+                        message.payload.metadata
+                    );
+                    return { success: true };
 
-        return new Promise((resolve, reject) => {
-            const timeout = setTimeout(() => {
-                this.pendingRequests.delete(requestId);
-                reject(new Error(`Worker request timeout after ${this.requestTimeout}ms`));
-            }, this.requestTimeout);
+                case 'REMOVE_FILE':
+                    await this.searchIndex.removeDocument(message.payload.id);
+                    return { success: true };
 
-            this.pendingRequests.set(requestId, { resolve, reject, timeout });
-            this.worker.postMessage(messageWithId);
-        });
+                case 'SEARCH':
+                    const results = await this.searchIndex.search(
+                        message.payload.query,
+                        message.payload.limit
+                    );
+                    return results;
+
+                case 'GET_STATS':
+                    return this.searchIndex.getStats();
+
+                case 'CLEAR_INDEX':
+                    await this.searchIndex.clear();
+                    return { success: true };
+
+                default:
+                    throw new Error(`Unknown message type: ${message.type}`);
+            }
+        } catch (error) {
+            console.error('Direct operation failed:', error);
+            throw error;
+        }
     }
 
     /**
@@ -275,9 +319,12 @@ export class IndexingCoordinator {
      * Read file content safely
      */
     private async readFileContent(file: TFile): Promise<string> {
-        // In a real Obsidian plugin, this would use app.vault.read(file)
-        // For now, we'll return a placeholder
-        return `Content of ${file.path}`;
+        try {
+            return await this.app.vault.read(file);
+        } catch (error) {
+            console.error(`Enhanced search: Failed to read file ${file.path}:`, error);
+            return '';
+        }
     }
 
     /**
@@ -396,8 +443,10 @@ export class IndexingCoordinator {
         // Reject all pending requests
         this.rejectAllPendingRequests(new Error('IndexingCoordinator destroyed'));
 
-        // Terminate worker
-        this.worker.terminate();
+        // Terminate worker if it exists
+        if (this.worker) {
+            this.worker.terminate();
+        }
     }
 
     /**

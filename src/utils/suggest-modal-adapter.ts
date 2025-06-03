@@ -38,6 +38,20 @@ export default abstract class SuggestModalAdapter {
     abstract renderSuggestion(match: Match, content: HTMLElement, aux: HTMLElement): void;
     abstract onChooseSuggestion(match: Match, event: MouseEvent | KeyboardEvent): void;
 
+    /**
+     * Method to indicate if this adapter uses enhanced search
+     * Returns false by default, can be overridden by adapters that support enhanced search
+     */
+    usesEnhancedSearch(): boolean {
+        return false;
+    }
+
+    /**
+     * Optional method for adapters that support enhanced search
+     * Should return search results using the adapter's enhanced search capabilities
+     */
+    getSearchResults?(query: string): Promise<Match[]>;
+
     constructor(
         app: App,
         prevItems: OrderedSet<Match>,

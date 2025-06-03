@@ -113,10 +113,41 @@ export default class EnhancedFileAdapter extends SuggestModalAdapter {
      * Override to use enhanced search when available
      */
     async getSearchResults(query: string): Promise<Match[]> {
-        // For now, always fallback to original behavior to avoid loops
-        return this.getSortedItems().filter(item => 
-            item.text.toLowerCase().includes(query.toLowerCase())
-        );
+        if (!this.searchService) {
+            // Fallback to simple text filtering if no search service
+            return this.getSortedItems().filter(item => 
+                item.text.toLowerCase().includes(query.toLowerCase())
+            );
+        }
+
+        try {
+            const cleanQuery = this.cleanQuery(query);
+            console.log('Enhanced search: getSearchResults called with:', cleanQuery);
+            
+            if (!cleanQuery.trim()) {
+                // For empty query, return sorted items
+                return this.getSortedItems();
+            }
+
+            // Use enhanced search service for content search
+            const enhancedResults = await this.searchService.search(cleanQuery, this.plugin.settings.suggestionLimit);
+            console.log('Enhanced search: Found', enhancedResults.length, 'results for query:', cleanQuery);
+            
+            // Convert enhanced results back to Match format for compatibility
+            const matches = enhancedResults.map(result => new PaletteMatch(
+                result.id,
+                result.metadata.path,
+                result.metadata.tags || []
+            ));
+
+            return matches;
+        } catch (error) {
+            console.error('Enhanced search failed in getSearchResults:', error);
+            // Fallback to original search behavior
+            return this.getSortedItems().filter(item => 
+                item.text.toLowerCase().includes(query.toLowerCase())
+            );
+        }
     }
 
     renderSuggestion(match: Match, content: HTMLElement, aux?: HTMLElement): void {
@@ -226,7 +257,7 @@ export default class EnhancedFileAdapter extends SuggestModalAdapter {
      * Indicates this adapter uses enhanced search and should bypass worker-based search
      */
     usesEnhancedSearch(): boolean {
-        return false; // Disable enhanced search to avoid loops for now
+        return this.searchService !== undefined; // Return true if we have a search service
     }
 
     /**
