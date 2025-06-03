@@ -94,12 +94,35 @@ export class SemanticSearchEngine {
 
     logger.debug(`Semantic search: Found ${results.length} total matches from ${checkedFiles} files`);
 
-    // Sort by relevance score and limit results
+    // Sort by relevance score in descending order (highest similarity/relevance first)
+    // relevanceScore combines similarity with title matches, recency, tags, and headings
     const sortedResults = results
-      .sort((a, b) => b.relevanceScore - a.relevanceScore)
+      .sort((a, b) => {
+        // Primary sort: relevance score (descending)
+        const relevanceDiff = b.relevanceScore - a.relevanceScore;
+        if (Math.abs(relevanceDiff) > 0.001) { // Use small epsilon to handle floating point precision
+          return relevanceDiff;
+        }
+        
+        // Secondary sort: raw similarity score (descending) for ties
+        const similarityDiff = b.similarity - a.similarity;
+        if (Math.abs(similarityDiff) > 0.001) {
+          return similarityDiff;
+        }
+        
+        // Tertiary sort: alphabetical by filename for consistent ordering
+        return a.file.basename.localeCompare(b.file.basename);
+      })
       .slice(0, limit);
 
-    logger.debug(`Semantic search: Returning top ${sortedResults.length} results (limited from ${results.length})`);
+    logger.debug(`Semantic search: Returning top ${sortedResults.length} results (limited from ${results.length}) sorted by relevance score`);
+    
+    // Verify sorting worked correctly in debug mode
+    if (sortedResults.length > 1) {
+      const firstScore = sortedResults[0].relevanceScore;
+      const lastScore = sortedResults[sortedResults.length - 1].relevanceScore;
+      logger.debug(`Semantic search: Score range: ${firstScore.toFixed(3)} (highest) to ${lastScore.toFixed(3)} (lowest)`);
+    }
 
     // Cache results
     if (useCache) {
