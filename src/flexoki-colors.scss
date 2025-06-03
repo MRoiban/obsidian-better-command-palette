@@ -1,0 +1,330 @@
+/* Flexoki Color Palette for Better Command Palette */
+/* Color palette from: https://stephango.com/flexoki */
+
+:root {
+    /* Base Colors - Flexoki Palette */
+    --flexoki-black: #100F0F;
+    --flexoki-base-950: #1C1B1A;
+    --flexoki-base-900: #282726;
+    --flexoki-base-850: #343331;
+    --flexoki-base-800: #403E3C;
+    --flexoki-base-700: #575653;
+    --flexoki-base-600: #6F6E69;
+    --flexoki-base-500: #878580;
+    --flexoki-base-300: #B7B5AC;
+    --flexoki-base-200: #CECDC3;
+    --flexoki-base-150: #DAD8CE;
+    --flexoki-base-100: #E6E4D9;
+    --flexoki-base-50: #F2F0E5;
+    --flexoki-paper: #FFFCF0;
+
+    /* Accent Colors - Main values (600 for light, 400 for dark) */
+    --flexoki-red-600: #AF3029;
+    --flexoki-red-400: #D14D41;
+    --flexoki-orange-600: #BC5215;
+    --flexoki-orange-400: #DA702C;
+    --flexoki-yellow-600: #AD8301;
+    --flexoki-yellow-400: #D0A215;
+    --flexoki-green-600: #66800B;
+    --flexoki-green-400: #879A39;
+    --flexoki-cyan-600: #24837B;
+    --flexoki-cyan-400: #3AA99F;
+    --flexoki-blue-600: #205EA6;
+    --flexoki-blue-400: #4385BE;
+    --flexoki-purple-600: #5E409D;
+    --flexoki-purple-400: #8B7EC8;
+    --flexoki-magenta-600: #A02F6F;
+    --flexoki-magenta-400: #CE5D97;
+
+    /* Extended Palette - Additional shades for complex applications */
+    --flexoki-red-50: #FFF7F7;
+    --flexoki-red-100: #FEEBEB;
+    --flexoki-red-200: #FCD6D6;
+    --flexoki-red-300: #F9B3B3;
+    --flexoki-red-500: #C94A3D;
+    --flexoki-red-700: #922B24;
+    --flexoki-red-800: #7A241E;
+    --flexoki-red-900: #651E19;
+    --flexoki-red-950: #4A1612;
+
+    --flexoki-orange-50: #FFFAF7;
+    --flexoki-orange-100: #FEF2E8;
+    --flexoki-orange-200: #FDE4D1;
+    --flexoki-orange-300: #FBCBA4;
+    --flexoki-orange-500: #C8621F;
+    --flexoki-orange-700: #954713;
+    --flexoki-orange-800: #7D3C11;
+    --flexoki-orange-900: #68320F;
+    --flexoki-orange-950: #4D250B;
+
+    --flexoki-yellow-50: #FFFDF7;
+    --flexoki-yellow-100: #FEFAEB;
+    --flexoki-yellow-200: #FDF4D7;
+    --flexoki-yellow-300: #FAEAAF;
+    --flexoki-yellow-500: #B89103;
+    --flexoki-yellow-700: #8A6F02;
+    --flexoki-yellow-800: #745E02;
+    --flexoki-yellow-900: #614E02;
+    --flexoki-yellow-950: #483A01;
+
+    --flexoki-green-50: #F9FBF7;
+    --flexoki-green-100: #F1F6EA;
+    --flexoki-green-200: #E3EDD5;
+    --flexoki-green-300: #CCDBB0;
+    --flexoki-green-500: #70890C;
+    --flexoki-green-700: #556A09;
+    --flexoki-green-800: #485907;
+    --flexoki-green-900: #3C4A06;
+    --flexoki-green-950: #2D3705;
+
+    --flexoki-cyan-50: #F7FEFE;
+    --flexoki-cyan-100: #ECFCFB;
+    --flexoki-cyan-200: #D9F9F7;
+    --flexoki-cyan-300: #B8F3F0;
+    --flexoki-cyan-500: #278F85;
+    --flexoki-cyan-700: #1D6B65;
+    --flexoki-cyan-800: #195A55;
+    --flexoki-cyan-900: #154B47;
+    --flexoki-cyan-950: #103835;
+
+    --flexoki-blue-50: #F7FAFE;
+    --flexoki-blue-100: #EBF4FD;
+    --flexoki-blue-200: #D6E9FB;
+    --flexoki-blue-300: #B5D5F8;
+    --flexoki-blue-500: #246BB0;
+    --flexoki-blue-700: #1B4F87;
+    --flexoki-blue-800: #174270;
+    --flexoki-blue-900: #13375C;
+    --flexoki-blue-950: #0E2943;
+
+    --flexoki-purple-50: #FAFAFE;
+    --flexoki-purple-100: #F3F0FD;
+    --flexoki-purple-200: #E7E0FA;
+    --flexoki-purple-300: #D4C4F6;
+    --flexoki-purple-500: #6747A4;
+    --flexoki-purple-700: #4E3687;
+    --flexoki-purple-800: #422E71;
+    --flexoki-purple-900: #37265D;
+    --flexoki-purple-950: #291D44;
+
+    --flexoki-magenta-50: #FEF8FB;
+    --flexoki-magenta-100: #FCEFF6;
+    --flexoki-magenta-200: #F9DFED;
+    --flexoki-magenta-300: #F4C2DE;
+    --flexoki-magenta-500: #A93375;
+    --flexoki-magenta-700: #89275B;
+    --flexoki-magenta-800: #73214C;
+    --flexoki-magenta-900: #5F1C40;
+    --flexoki-magenta-950: #46152F;
+}
+
+/* Light Theme Mappings */
+:root,
+.theme-light {
+    /* Base mappings for light theme */
+    --bcp-bg: var(--flexoki-paper);
+    --bcp-bg-2: var(--flexoki-base-50);
+    --bcp-ui: var(--flexoki-base-100);
+    --bcp-ui-2: var(--flexoki-base-150);
+    --bcp-ui-3: var(--flexoki-base-200);
+    --bcp-tx: var(--flexoki-black);
+    --bcp-tx-2: var(--flexoki-base-600);
+    --bcp-tx-3: var(--flexoki-base-300);
+
+    /* Accent colors for light theme */
+    --bcp-re: var(--flexoki-red-600);
+    --bcp-re-2: var(--flexoki-red-400);
+    --bcp-or: var(--flexoki-orange-600);
+    --bcp-or-2: var(--flexoki-orange-400);
+    --bcp-ye: var(--flexoki-yellow-600);
+    --bcp-ye-2: var(--flexoki-yellow-400);
+    --bcp-gr: var(--flexoki-green-600);
+    --bcp-gr-2: var(--flexoki-green-400);
+    --bcp-cy: var(--flexoki-cyan-600);
+    --bcp-cy-2: var(--flexoki-cyan-400);
+    --bcp-bl: var(--flexoki-blue-600);
+    --bcp-bl-2: var(--flexoki-blue-400);
+    --bcp-pu: var(--flexoki-purple-600);
+    --bcp-pu-2: var(--flexoki-purple-400);
+    --bcp-ma: var(--flexoki-magenta-600);
+    --bcp-ma-2: var(--flexoki-magenta-400);
+}
+
+/* Dark Theme Mappings */
+.theme-dark {
+    /* Base mappings for dark theme */
+    --bcp-bg: var(--flexoki-black);
+    --bcp-bg-2: var(--flexoki-base-950);
+    --bcp-ui: var(--flexoki-base-900);
+    --bcp-ui-2: var(--flexoki-base-850);
+    --bcp-ui-3: var(--flexoki-base-800);
+    --bcp-tx: var(--flexoki-base-200);
+    --bcp-tx-2: var(--flexoki-base-500);
+    --bcp-tx-3: var(--flexoki-base-700);
+
+    /* Accent colors for dark theme */
+    --bcp-re: var(--flexoki-red-400);
+    --bcp-re-2: var(--flexoki-red-600);
+    --bcp-or: var(--flexoki-orange-400);
+    --bcp-or-2: var(--flexoki-orange-600);
+    --bcp-ye: var(--flexoki-yellow-400);
+    --bcp-ye-2: var(--flexoki-yellow-600);
+    --bcp-gr: var(--flexoki-green-400);
+    --bcp-gr-2: var(--flexoki-green-600);
+    --bcp-cy: var(--flexoki-cyan-400);
+    --bcp-cy-2: var(--flexoki-cyan-600);
+    --bcp-bl: var(--flexoki-blue-400);
+    --bcp-bl-2: var(--flexoki-blue-600);
+    --bcp-pu: var(--flexoki-purple-400);
+    --bcp-pu-2: var(--flexoki-purple-600);
+    --bcp-ma: var(--flexoki-magenta-400);
+    --bcp-ma-2: var(--flexoki-magenta-600);
+}
+
+/* Flexoki-Enhanced Component Styles */
+.better-command-palette {
+    /* Override Obsidian variables with Flexoki equivalents where appropriate */
+    --text-normal: var(--bcp-tx);
+    --text-muted: var(--bcp-tx-2);
+    --text-faint: var(--bcp-tx-3);
+    --text-accent: var(--bcp-bl);
+    --text-error: var(--bcp-re);
+    --text-success: var(--bcp-gr);
+    --text-warning: var(--bcp-or);
+    
+    --background-primary: var(--bcp-bg);
+    --background-primary-alt: var(--bcp-bg-2);
+    --background-secondary: var(--bcp-ui);
+    --background-secondary-alt: var(--bcp-ui-2);
+    
+    --background-modifier-border: var(--bcp-ui-3);
+    --background-modifier-border-hover: var(--bcp-tx-3);
+    --background-modifier-border-focus: var(--bcp-bl);
+    
+    --background-modifier-hover: rgba(var(--flexoki-base-500-rgb), 0.1);
+    --background-modifier-active-hover: rgba(var(--bcp-bl-rgb), 0.1);
+    --background-modifier-selected: rgba(var(--bcp-bl-rgb), 0.15);
+    
+    --color-accent: var(--bcp-bl);
+    --color-accent-hover: var(--bcp-bl-2);
+    
+    --interactive-accent: var(--bcp-bl);
+    --interactive-accent-hover: var(--bcp-bl-2);
+    --text-on-accent: var(--flexoki-paper);
+    
+    /* File type specific colors using Flexoki accents */
+    .file-type-indicator {
+        &.md {
+            background: rgba(var(--bcp-bl-rgb), 0.15);
+            color: var(--bcp-bl);
+        }
+        
+        &.txt {
+            background: rgba(var(--bcp-tx-2-rgb), 0.15);
+            color: var(--bcp-tx-2);
+        }
+        
+        &.pdf {
+            background: rgba(var(--bcp-re-rgb), 0.15);
+            color: var(--bcp-re);
+        }
+        
+        &.img {
+            background: rgba(var(--bcp-gr-rgb), 0.15);
+            color: var(--bcp-gr);
+        }
+        
+        &.json {
+            background: rgba(var(--bcp-ye-rgb), 0.15);
+            color: var(--bcp-ye);
+        }
+        
+        &.js, &.ts {
+            background: rgba(var(--bcp-cy-rgb), 0.15);
+            color: var(--bcp-cy);
+        }
+        
+        &.css, &.scss {
+            background: rgba(var(--bcp-pu-rgb), 0.15);
+            color: var(--bcp-pu);
+        }
+        
+        &.html {
+            background: rgba(var(--bcp-ma-rgb), 0.15);
+            color: var(--bcp-ma);
+        }
+    }
+    
+    /* Enhanced suggestion hotkeys with Flexoki colors */
+    .suggestion-hotkey {
+        &.recent {
+            background: rgba(var(--bcp-bl-rgb), 0.15);
+            color: var(--bcp-bl);
+            border: 1px solid rgba(var(--bcp-bl-rgb), 0.3);
+        }
+        
+        &.modified {
+            background: rgba(var(--bcp-gr-rgb), 0.15);
+            color: var(--bcp-gr);
+            border: 1px solid rgba(var(--bcp-gr-rgb), 0.3);
+        }
+        
+        &.favorite {
+            background: rgba(var(--bcp-ye-rgb), 0.15);
+            color: var(--bcp-ye);
+            border: 1px solid rgba(var(--bcp-ye-rgb), 0.3);
+        }
+    }
+    
+    /* Score visualization using Flexoki accent colors */
+    .search-result-scores {
+        .score-fill {
+            background: linear-gradient(90deg, var(--bcp-bl), var(--bcp-cy));
+        }
+        
+        .score-item {
+            &.fuzzy .score-fill {
+                background: var(--bcp-bl);
+            }
+            
+            &.content .score-fill {
+                background: var(--bcp-gr);
+            }
+            
+            &.path .score-fill {
+                background: var(--bcp-or);
+            }
+            
+            &.recency .score-fill {
+                background: var(--bcp-pu);
+            }
+        }
+    }
+}
+
+/* RGB variants for rgba() usage */
+:root {
+    --flexoki-base-500-rgb: 135, 133, 128;
+    --bcp-bl-rgb: 32, 94, 166; /* Light theme blue-600 */
+    --bcp-bl-2-rgb: 67, 133, 190; /* Light theme blue-400 */
+    --bcp-tx-2-rgb: 111, 110, 105;
+    --bcp-re-rgb: 175, 48, 41;
+    --bcp-gr-rgb: 102, 128, 11;
+    --bcp-ye-rgb: 173, 131, 1;
+    --bcp-cy-rgb: 36, 131, 123;
+    --bcp-pu-rgb: 94, 64, 157;
+    --bcp-ma-rgb: 160, 47, 111;
+    --bcp-or-rgb: 188, 82, 21;
+}
+
+.theme-dark {
+    --bcp-bl-rgb: 67, 133, 190; /* Dark theme blue-400 */
+    --bcp-bl-2-rgb: 32, 94, 166; /* Dark theme blue-600 */
+    --bcp-re-rgb: 209, 77, 65;
+    --bcp-gr-rgb: 135, 154, 57;
+    --bcp-ye-rgb: 208, 162, 21;
+    --bcp-cy-rgb: 58, 169, 159;
+    --bcp-pu-rgb: 139, 126, 200;
+    --bcp-ma-rgb: 206, 93, 151;
+    --bcp-or-rgb: 218, 112, 44;
+} 

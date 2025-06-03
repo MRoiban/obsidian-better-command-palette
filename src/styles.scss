@@ -1,3 +1,6 @@
+/* Import Flexoki Color Palette */
+@use './flexoki-colors.scss';
+
 /* Better Command Palette Enhanced File Search Variables */
 :root {
     --bcp-transition-speed: 0.15s;
@@ -86,15 +89,15 @@
             transition: all 0.15s ease;
 
             &.recent {
-                background: rgba(59, 130, 246, 0.15);
-                color: rgb(59, 130, 246);
-                border: 1px solid rgba(59, 130, 246, 0.3);
+                background: rgba(var(--bcp-bl-rgb), 0.15);
+                color: var(--bcp-bl);
+                border: 1px solid rgba(var(--bcp-bl-rgb), 0.3);
             }
 
             &.modified {
-                background: rgba(34, 197, 94, 0.15);
-                color: rgb(34, 197, 94);
-                border: 1px solid rgba(34, 197, 94, 0.3);
+                background: rgba(var(--bcp-gr-rgb), 0.15);
+                color: var(--bcp-gr);
+                border: 1px solid rgba(var(--bcp-gr-rgb), 0.3);
             }
         }
 
@@ -217,23 +220,23 @@
             opacity: 0.8;
 
             &.md {
-                background: rgba(59, 130, 246, 0.2);
-                color: rgb(59, 130, 246);
+                background: rgba(var(--bcp-bl-rgb), 0.2);
+                color: var(--bcp-bl);
             }
 
             &.txt {
-                background: rgba(156, 163, 175, 0.2);
-                color: rgb(156, 163, 175);
+                background: rgba(var(--bcp-tx-2-rgb), 0.2);
+                color: var(--bcp-tx-2);
             }
 
             &.pdf {
-                background: rgba(239, 68, 68, 0.2);
-                color: rgb(239, 68, 68);
+                background: rgba(var(--bcp-re-rgb), 0.2);
+                color: var(--bcp-re);
             }
 
             &.img {
-                background: rgba(34, 197, 94, 0.2);
-                color: rgb(34, 197, 94);
+                background: rgba(var(--bcp-gr-rgb), 0.2);
+                color: var(--bcp-gr);
             }
         }
 
