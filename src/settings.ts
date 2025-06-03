@@ -112,37 +112,37 @@ export class BetterCommandPaletteSettingTab extends PluginSettingTab {
         const sections: SettingsSection[] = [
             {
                 id: 'general',
-                title: '⚙️ General Settings',
+                title: 'General Settings',
                 description: 'Basic plugin behavior and display options',
                 collapsed: false
             },
             {
                 id: 'search',
-                title: '🔍 Search & Navigation',
+                title: 'Search & Navigation',
                 description: 'Configure search prefixes, hotkeys, and display options',
                 collapsed: false
             },
             {
                 id: 'enhanced-search',
-                title: '🚀 Enhanced Content Search',
+                title: 'Enhanced Content Search',
                 description: 'Advanced search with content indexing and smart scoring',
                 collapsed: true
             },
             {
                 id: 'semantic-search',
-                title: '🧠 Semantic Search',
+                title: 'Semantic Search',
                 description: 'AI-powered semantic search using Ollama embeddings',
                 collapsed: true
             },
             {
                 id: 'macros',
-                title: '⚡ Command Macros',
+                title: 'Command Macros',
                 description: 'Create and manage custom command sequences',
                 collapsed: true
             },
             {
                 id: 'advanced',
-                title: '🔧 Advanced Options',
+                title: 'Advanced Options',
                 description: 'File exclusions, hidden items, and advanced customization',
                 collapsed: true
             }
@@ -443,7 +443,7 @@ export class BetterCommandPaletteSettingTab extends PluginSettingTab {
         if (!settings.semanticSearch.enableSemanticSearch) {
             const infoEl = containerEl.createEl('div', { cls: 'settings-info' });
             infoEl.createEl('p', { 
-                text: '💡 Semantic search requires Ollama to be installed and running. Enable this feature to configure advanced AI-powered search capabilities.'
+                text: 'Semantic search requires Ollama to be installed and running. Enable this feature to configure advanced AI-powered search capabilities.'
             });
             return;
         }
@@ -575,7 +575,7 @@ export class BetterCommandPaletteSettingTab extends PluginSettingTab {
         if (settings.macros.length === 0) {
             const emptyEl = containerEl.createEl('div', { cls: 'settings-empty' });
             emptyEl.createEl('p', { 
-                text: '📝 No macros created yet. Macros allow you to chain multiple commands together for quick execution.'
+                text: 'No macros created yet. Macros allow you to chain multiple commands together for quick execution.'
             });
         }
 
@@ -634,7 +634,7 @@ export class BetterCommandPaletteSettingTab extends PluginSettingTab {
 
         new Setting(resetGroup)
             .setName('Reset All Settings')
-            .setDesc('⚠️ Reset all plugin settings to default values')
+            .setDesc('Reset all plugin settings to default values')
             .addButton(button => button
                 .setButtonText('Reset All')
                 .setWarning()
@@ -679,11 +679,11 @@ export class BetterCommandPaletteSettingTab extends PluginSettingTab {
 
         try {
             await this.plugin.reindexSemanticSearch();
-            new Notice('✅ Semantic search index rebuilt successfully');
+            new Notice('Semantic search index rebuilt successfully');
             logger.info('Semantic search index rebuilt successfully');
         } catch (error) {
             const errorMsg = `Failed to rebuild index: ${error.message}`;
-            new Notice(`❌ ${errorMsg}`);
+            new Notice(errorMsg);
             logger.error('Failed to rebuild semantic search index', error);
         } finally {
             button.textContent = originalText;
@@ -708,7 +708,7 @@ export class BetterCommandPaletteSettingTab extends PluginSettingTab {
         
         // Macro header
         const headerSetting = new Setting(macroContainer)
-            .setName(`🔗 ${macro.name}`)
+            .setName(`${macro.name}`)
             .setDesc(`${macro.commandIds.length} commands • ${macro.delay}ms delay`)
             .addButton(button => button
                 .setButtonText('Delete')
@@ -840,7 +840,7 @@ export class BetterCommandPaletteSettingTab extends PluginSettingTab {
             this.plugin.settings = { ...DEFAULT_SETTINGS };
             await this.plugin.saveSettings();
             this.display();
-            new Notice('✅ All settings have been reset to defaults');
+            new Notice('All settings have been reset to defaults');
         }
     }
 }

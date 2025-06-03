@@ -48,7 +48,7 @@ export class SearchSettingsPanel {
     private addDisabledInfo(): void {
         const infoEl = this.containerEl.createEl('div', { cls: 'settings-info' });
         infoEl.createEl('p', { 
-            text: '💡 Enhanced content search provides intelligent file ranking based on content relevance, usage patterns, and recency. Enable this feature to unlock advanced search capabilities.'
+            text: 'Enhanced content search provides intelligent file ranking based on content relevance, usage patterns, and recency. Enable this feature to unlock advanced search capabilities.'
         });
     }
 
@@ -115,7 +115,7 @@ export class SearchSettingsPanel {
         // Add weight validation info
         const validationEl = weightGroup.createEl('div', { cls: 'settings-info' });
         validationEl.createEl('p', {
-            text: `ℹ️ Current total weight: ${(settings.scoreWeights.relevance + settings.scoreWeights.recency + settings.scoreWeights.frequency).toFixed(2)}. Ideal range is 0.8-1.2 for optimal results.`
+            text: `Current total weight: ${(settings.scoreWeights.relevance + settings.scoreWeights.recency + settings.scoreWeights.frequency).toFixed(2)}. Ideal range is 0.8-1.2 for optimal results.`
         });
     }
 
@@ -308,7 +308,7 @@ export class SearchSettingsPanel {
                            settings.scoreWeights.frequency;
         
         if (totalWeight < 0.5 || totalWeight > 1.5) {
-            new Notice('⚠️ Score weights seem unbalanced. Consider adjusting for optimal results.');
+            new Notice('Score weights seem unbalanced. Consider adjusting for optimal results.');
         }
     }
 
@@ -326,10 +326,10 @@ export class SearchSettingsPanel {
             // This would call the usage tracker's reset method
             await new Promise(resolve => setTimeout(resolve, 1000)); // Simulate async operation
             
-            new Notice('✅ Usage data cleared successfully');
+            new Notice('Usage data cleared successfully');
             logger.info('Enhanced search usage data cleared');
         } catch (error) {
-            new Notice(`❌ Failed to clear usage data: ${error.message}`);
+            new Notice(`Failed to clear usage data: ${error.message}`);
             logger.error('Failed to clear enhanced search usage data', error);
         } finally {
             button.textContent = originalText;
@@ -347,10 +347,10 @@ export class SearchSettingsPanel {
             // This would clear the index and reindex all files
             await new Promise(resolve => setTimeout(resolve, 2000)); // Simulate async operation
             
-            new Notice('✅ Search index rebuilt successfully');
+            new Notice('Search index rebuilt successfully');
             logger.info('Enhanced search index rebuilt successfully');
         } catch (error) {
-            new Notice(`❌ Failed to rebuild index: ${error.message}`);
+            new Notice(`Failed to rebuild index: ${error.message}`);
             logger.error('Failed to rebuild enhanced search index', error);
         } finally {
             button.textContent = originalText;
@@ -367,10 +367,10 @@ export class SearchSettingsPanel {
             // TODO: Implement actual cache clearing
             await new Promise(resolve => setTimeout(resolve, 500)); // Simulate async operation
             
-            new Notice('✅ Search cache cleared successfully');
+            new Notice('Search cache cleared successfully');
             logger.info('Enhanced search cache cleared');
         } catch (error) {
-            new Notice(`❌ Failed to clear cache: ${error.message}`);
+            new Notice(`Failed to clear cache: ${error.message}`);
             logger.error('Failed to clear enhanced search cache', error);
         } finally {
             button.textContent = originalText;
