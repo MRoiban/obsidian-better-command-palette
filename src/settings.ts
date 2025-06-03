@@ -1,13 +1,13 @@
 import {
-    App, Command, Modifier, PluginSettingTab, setIcon, Setting,
+    App, Command, Modifier, PluginSettingTab, setIcon, Setting, Notice
 } from 'obsidian';
-import { Notice } from 'obsidian';
 import BetterCommandPalettePlugin from 'src/main';
 import { HotkeyStyleType, MacroCommandInterface, UnsafeAppInterface } from './types/types';
 import { SettingsCommandSuggestModal } from './utils';
 import { SearchSettings } from './search/interfaces';
 import { SearchSettingsPanel } from './search/settings-panel';
 import { SemanticSearchSettings } from './search/semantic/types';
+import { logger } from './utils/logger';
 
 export interface BetterCommandPalettePluginSettings {
     closeWithBackspace: boolean,
@@ -89,392 +89,758 @@ export const DEFAULT_SETTINGS: BetterCommandPalettePluginSettings = {
     }
 };
 
+interface SettingsSection {
+    id: string;
+    title: string;
+    description?: string;
+    collapsed: boolean;
+}
+
 export class BetterCommandPaletteSettingTab extends PluginSettingTab {
     plugin: BetterCommandPalettePlugin;
-
     app!: UnsafeAppInterface;
+    private sections: Map<string, SettingsSection> = new Map();
+    private sectionElements: Map<string, HTMLElement> = new Map();
 
-    constructor (app: App, plugin: BetterCommandPalettePlugin) {
+    constructor(app: App, plugin: BetterCommandPalettePlugin) {
         super(app, plugin);
         this.plugin = plugin;
+        this.initializeSections();
     }
 
-    display (): void {
+    private initializeSections(): void {
+        const sections: SettingsSection[] = [
+            {
+                id: 'general',
+                title: '⚙️ General Settings',
+                description: 'Basic plugin behavior and display options',
+                collapsed: false
+            },
+            {
+                id: 'search',
+                title: '🔍 Search & Navigation',
+                description: 'Configure search prefixes, hotkeys, and display options',
+                collapsed: false
+            },
+            {
+                id: 'enhanced-search',
+                title: '🚀 Enhanced Content Search',
+                description: 'Advanced search with content indexing and smart scoring',
+                collapsed: true
+            },
+            {
+                id: 'semantic-search',
+                title: '🧠 Semantic Search',
+                description: 'AI-powered semantic search using Ollama embeddings',
+                collapsed: true
+            },
+            {
+                id: 'macros',
+                title: '⚡ Command Macros',
+                description: 'Create and manage custom command sequences',
+                collapsed: true
+            },
+            {
+                id: 'advanced',
+                title: '🔧 Advanced Options',
+                description: 'File exclusions, hidden items, and advanced customization',
+                collapsed: true
+            }
+        ];
+
+        sections.forEach(section => {
+            this.sections.set(section.id, section);
+        });
+    }
+
+    display(): void {
         this.containerEl.empty();
-        this.displayBasicSettings();
-        this.displayEnhancedSearchSettings();
-        this.displaySemanticSearchSettings();
-        this.displayMacroSettings();
+        this.createHeader();
+        this.createSettingsSections();
     }
 
-    displayBasicSettings (): void {
-        const { containerEl } = this;
+    private createHeader(): void {
+        const headerEl = this.containerEl.createEl('div', { cls: 'settings-header' });
+        
+        const titleEl = headerEl.createEl('h1', { 
+            text: 'Better Command Palette',
+            cls: 'settings-title'
+        });
+        
+        const subtitleEl = headerEl.createEl('p', {
+            text: 'Enhance your Obsidian workflow with improved command palette, search, and navigation',
+            cls: 'settings-subtitle'
+        });
+
+        // Add quick stats
+        const statsEl = headerEl.createEl('div', { cls: 'settings-stats' });
+        const macroCount = this.plugin.settings.macros.length;
+        const hiddenCount = this.plugin.settings.hiddenCommands.length + 
+                           this.plugin.settings.hiddenFiles.length + 
+                           this.plugin.settings.hiddenTags.length;
+        
+        statsEl.createEl('span', { 
+            text: `${macroCount} macros`, 
+            cls: 'stat-item' 
+        });
+        statsEl.createEl('span', { 
+            text: `${hiddenCount} hidden items`, 
+            cls: 'stat-item' 
+        });
+    }
+
+    private createSettingsSections(): void {
+        this.sections.forEach((section, sectionId) => {
+            this.createSection(sectionId, section);
+        });
+    }
+
+    private createSection(sectionId: string, section: SettingsSection): void {
+        const sectionContainer = this.containerEl.createEl('div', { 
+            cls: 'settings-section-container' 
+        });
+
+        // Section header
+        const headerEl = sectionContainer.createEl('div', { 
+            cls: 'settings-section-header'
+        });
+        
+        const titleEl = headerEl.createEl('h2', { 
+            text: section.title,
+            cls: 'settings-section-title'
+        });
+
+        if (section.description) {
+            headerEl.createEl('p', {
+                text: section.description,
+                cls: 'settings-section-description'
+            });
+        }
+
+        // Collapse toggle
+        const toggleEl = headerEl.createEl('div', { 
+            cls: `settings-section-toggle ${section.collapsed ? 'collapsed' : ''}` 
+        });
+        setIcon(toggleEl, 'chevron-down');
+
+        // Section content
+        const contentEl = sectionContainer.createEl('div', { 
+            cls: `settings-section-content ${section.collapsed ? 'collapsed' : ''}` 
+        });
+
+        this.sectionElements.set(sectionId, contentEl);
+
+        // Toggle functionality
+        headerEl.addEventListener('click', () => {
+            const isCollapsed = section.collapsed;
+            section.collapsed = !isCollapsed;
+            
+            toggleEl.toggleClass('collapsed', section.collapsed);
+            contentEl.toggleClass('collapsed', section.collapsed);
+        });
+
+        // Populate section content
+        this.populateSection(sectionId, contentEl);
+    }
+
+    private populateSection(sectionId: string, containerEl: HTMLElement): void {
+        switch (sectionId) {
+            case 'general':
+                this.createGeneralSettings(containerEl);
+                break;
+            case 'search':
+                this.createSearchSettings(containerEl);
+                break;
+            case 'enhanced-search':
+                this.createEnhancedSearchSettings(containerEl);
+                break;
+            case 'semantic-search':
+                this.createSemanticSearchSettings(containerEl);
+                break;
+            case 'macros':
+                this.createMacroSettings(containerEl);
+                break;
+            case 'advanced':
+                this.createAdvancedSettings(containerEl);
+                break;
+        }
+    }
+
+    private createGeneralSettings(containerEl: HTMLElement): void {
         const { settings } = this.plugin;
 
-        containerEl.empty();
-
-        containerEl.createEl('h2', { text: 'Better Command Palette Settings' });
         new Setting(containerEl)
             .setName('Close on Backspace')
             .setDesc('Close the palette when there is no text and backspace is pressed')
-            .addToggle((t) => t.setValue(settings.closeWithBackspace).onChange(async (val) => {
-                settings.closeWithBackspace = val;
-                await this.plugin.saveSettings();
-            }));
+            .addToggle(toggle => toggle
+                .setValue(settings.closeWithBackspace)
+                .onChange(async (value) => {
+                    settings.closeWithBackspace = value;
+                    await this.plugin.saveSettings();
+                })
+            );
 
         new Setting(containerEl)
             .setName('Show Plugin Name')
-            .setDesc('Show the plugin name in the command palette')
-            .addToggle((t) => t.setValue(settings.showPluginName).onChange(async (val) => {
-                settings.showPluginName = val;
-                await this.plugin.saveSettings();
-            }));
-
-        new Setting(containerEl)
-            .setName('Recent above Pinned')
-            .setDesc('Sorts the suggestion so that the recently used items show before pinned items.')
-            .addToggle((t) => t.setValue(settings.recentAbovePinned).onChange(async (val) => {
-                settings.recentAbovePinned = val;
-                await this.plugin.saveSettings();
-            }));
-
-        new Setting(containerEl)
-            .setName('Caps Lock Hyper Key Hotkey Override')
-            .setDesc('For those users who have use a "Hyper Key", enabling this maps the icons "⌥ ^ ⌘ ⇧" to the caps lock icon "⇪" ')
-            .addToggle((t) => t.setValue(settings.hyperKeyOverride).onChange(async (val) => {
-                settings.hyperKeyOverride = val;
-                await this.plugin.saveSettings();
-            }));
-
-        new Setting(containerEl)
-            .setName('Use shift to create files and cmd/CTRL to open in new tab')
-            .setDesc('By default cmd/ctrl is used to create files and shift is used to open in new tab. This setting reverses that to mimic the behavior of the standard quick switcher.')
-            .addToggle((t) => t.setValue(settings.createNewFileMod === 'Shift').onChange(async (val) => {
-                settings.createNewFileMod = val ? 'Shift' : 'Mod';
-                settings.openInNewTabMod = val ? 'Mod' : 'Shift';
-                await this.plugin.saveSettings();
-            }));
-
-        new Setting(containerEl)
-            .setName("Display only notes' names")
-            .setDesc("If enabled, only notes names will be displayed in Quick Switcher mode instead of their full path.")
-            .addToggle((t) => t.setValue(settings.displayOnlyNotesNames).onChange(async (val) => {
-                settings.displayOnlyNotesNames = val;
-                await this.plugin.saveSettings();
-            }));
-
-        new Setting(containerEl)
-            .setName("Hide .md extensions")
-            .setDesc("If enabled, Markdown notes will be displayed without their .md extension in Quick Switcher mode")
-            .addToggle((t) => t.setValue(settings.hideMdExtension).onChange(async (val) => {
-                settings.hideMdExtension = val;
-                await this.plugin.saveSettings();
-            }));
-
-
-        new Setting(containerEl)
-            .setName('Recently used text')
-            .setDesc('This text will be displayed next to recently used items')
-            .addText((t) => t.setValue(settings.recentlyUsedText).onChange(async (val) => {
-                settings.recentlyUsedText = val;
-                await this.plugin.saveSettings();
-            }));
-
-        new Setting(containerEl)
-            .setName('File Type Exclusions')
-            .setDesc('A comma separated list of file extensions (ex: "pdf,jpg,png") that should not be shown when searching files.')
-            .addText((t) => t.setValue(settings.fileTypeExclusion.join(',')).onChange(async (val) => {
-                const list = val.split(',').map((e) => e.trim());
-                settings.fileTypeExclusion = list;
-                await this.plugin.saveSettings();
-            }));
-
-        new Setting(containerEl)
-            .setName('File Search Prefix')
-            .setDesc('The prefix used to tell the palette you want to search files')
-            .addText((t) => t.setValue(settings.fileSearchPrefix).onChange(async (val) => {
-                settings.fileSearchPrefix = val;
-                await this.plugin.saveSettings();
-            }));
-
-        new Setting(containerEl)
-            .setName('Tag Search Prefix')
-            .setDesc('The prefix used to tell the palette you want to search tags')
-            .addText((t) => t.setValue(settings.tagSearchPrefix).onChange(async (val) => {
-                settings.tagSearchPrefix = val;
-                await this.plugin.saveSettings();
-            }));
-
-        new Setting(containerEl)
-            .setName('Command Search Hotkey')
-            .setDesc('The hotkey used to switch to command search while using the command palette.')
-            .addText((t) => t.setValue(settings.commandSearchHotkey).onChange(async (val) => {
-                settings.commandSearchHotkey = val;
-                await this.plugin.saveSettings();
-            }));
-
-        new Setting(containerEl)
-            .setName('File Search Hotkey')
-            .setDesc('The hotkey used to switch to file search while using the command palette.')
-            .addText((t) => t.setValue(settings.fileSearchHotkey).onChange(async (val) => {
-                settings.fileSearchHotkey = val;
-                await this.plugin.saveSettings();
-            }));
-
-        new Setting(containerEl)
-            .setName('Tag Search Hotkey')
-            .setDesc('The hotkey used to switch to tag search while using the command palette.')
-            .addText((t) => t.setValue(settings.tagSearchHotkey).onChange(async (val) => {
-                settings.tagSearchHotkey = val;
-                await this.plugin.saveSettings();
-            }));
-
-        const dropdownOptions = {
-            10: '10',
-            20: '20',
-            50: '50',
-            100: '100',
-            200: '200',
-            500: '500',
-            1000: '1000',
-        };
-        new Setting(containerEl)
-            .setName('Suggestion Limit')
-            .setDesc('The number of items that will be in the suggestion list of the palette. Really high numbers can affect performance')
-            .addDropdown((d) => d.addOptions(dropdownOptions)
-                .setValue(settings.suggestionLimit.toString())
-                .onChange(async (v) => {
-                    settings.suggestionLimit = parseInt(v, 10);
+            .setDesc('Display the plugin name in commands for easier identification')
+            .addToggle(toggle => toggle
+                .setValue(settings.showPluginName)
+                .onChange(async (value) => {
+                    settings.showPluginName = value;
                     await this.plugin.saveSettings();
-                }));
+                })
+            );
 
         new Setting(containerEl)
-            .setName('Hotkey Modifier Style')
-            .setDesc('Allows autodetecting of hotkey modifier or forcing to Mac or Windows')
-            .addDropdown((d) => d.addOptions({
-                auto: 'Auto Detect',
-                mac: 'Force Mac Hotkeys',
-                windows: 'Force Windows Hotkeys',
-            }).setValue(settings.hotkeyStyle)
-                .onChange(async (v) => {
-                    settings.hotkeyStyle = v as HotkeyStyleType;
+            .setName('Recent Above Pinned')
+            .setDesc('Prioritize recently used items over pinned items in search results')
+            .addToggle(toggle => toggle
+                .setValue(settings.recentAbovePinned)
+                .onChange(async (value) => {
+                    settings.recentAbovePinned = value;
                     await this.plugin.saveSettings();
-                }));
+                })
+            );
 
         new Setting(containerEl)
-            .setName('Add new macro')
-            .setDesc('Create a new grouping of commands that can be run together')
-            .addButton((button) => button
-                .setButtonText('+')
-                .onClick(async () => {
-                    settings.macros.push({
-                        name: `Macro ${settings.macros.length + 1}`,
-                        commandIds: [],
-                        delay: 200,
-                    });
-                    await this.plugin.saveSettings();
-                    this.display();
-                }));
+            .setName('Recently Used Label')
+            .setDesc('Custom text displayed next to recently used items')
+            .addText(text => text
+                .setPlaceholder('(recently used)')
+                .setValue(settings.recentlyUsedText)
+                .onChange(async (value) => {
+                    if (value.trim()) {
+                        settings.recentlyUsedText = value;
+                        await this.plugin.saveSettings();
+                    }
+                })
+            );
     }
 
-    displayEnhancedSearchSettings(): void {
-        const { containerEl } = this;
-        
-        // Create a section for enhanced search settings
-        containerEl.createEl('h2', { text: 'Enhanced Content Search' });
-        
+    private createSearchSettings(containerEl: HTMLElement): void {
+        const { settings } = this.plugin;
+
+        // Search Prefixes
+        const prefixGroup = containerEl.createEl('div', { cls: 'settings-group' });
+        prefixGroup.createEl('h3', { text: 'Search Prefixes', cls: 'settings-group-title' });
+
+        new Setting(prefixGroup)
+            .setName('File Search Prefix')
+            .setDesc('Character to trigger file search mode')
+            .addText(text => text
+                .setPlaceholder('/')
+                .setValue(settings.fileSearchPrefix)
+                .onChange(async (value) => {
+                    if (this.validatePrefix(value)) {
+                        settings.fileSearchPrefix = value;
+                        await this.plugin.saveSettings();
+                    }
+                })
+            );
+
+        new Setting(prefixGroup)
+            .setName('Tag Search Prefix')
+            .setDesc('Character to trigger tag search mode')
+            .addText(text => text
+                .setPlaceholder('#')
+                .setValue(settings.tagSearchPrefix)
+                .onChange(async (value) => {
+                    if (this.validatePrefix(value)) {
+                        settings.tagSearchPrefix = value;
+                        await this.plugin.saveSettings();
+                    }
+                })
+            );
+
+        // Display Options
+        const displayGroup = containerEl.createEl('div', { cls: 'settings-group' });
+        displayGroup.createEl('h3', { text: 'Display Options', cls: 'settings-group-title' });
+
+        new Setting(displayGroup)
+            .setName('Display Only Note Names')
+            .setDesc('Show only file names instead of full paths in search results')
+            .addToggle(toggle => toggle
+                .setValue(settings.displayOnlyNotesNames)
+                .onChange(async (value) => {
+                    settings.displayOnlyNotesNames = value;
+                    await this.plugin.saveSettings();
+                })
+            );
+
+        new Setting(displayGroup)
+            .setName('Hide .md Extensions')
+            .setDesc('Remove .md extensions from note names in search results')
+            .addToggle(toggle => toggle
+                .setValue(settings.hideMdExtension)
+                .onChange(async (value) => {
+                    settings.hideMdExtension = value;
+                    await this.plugin.saveSettings();
+                })
+            );
+
+        new Setting(displayGroup)
+            .setName('Suggestion Limit')
+            .setDesc('Maximum number of suggestions to display')
+            .addSlider(slider => slider
+                .setLimits(10, 100, 5)
+                .setValue(settings.suggestionLimit)
+                .setDynamicTooltip()
+                .onChange(async (value) => {
+                    settings.suggestionLimit = value;
+                    await this.plugin.saveSettings();
+                })
+            );
+
+        // Keyboard Shortcuts
+        const keyboardGroup = containerEl.createEl('div', { cls: 'settings-group' });
+        keyboardGroup.createEl('h3', { text: 'Keyboard Shortcuts', cls: 'settings-group-title' });
+
+        new Setting(keyboardGroup)
+            .setName('Hyper Key Override')
+            .setDesc('Use caps lock icon (⇪) instead of ⌥ ^ ⌘ ⇧ for hyper key users')
+            .addToggle(toggle => toggle
+                .setValue(settings.hyperKeyOverride)
+                .onChange(async (value) => {
+                    settings.hyperKeyOverride = value;
+                    await this.plugin.saveSettings();
+                })
+            );
+
+        new Setting(keyboardGroup)
+            .setName('Reverse File Creation Shortcut')
+            .setDesc('Use Shift to create files and Cmd/Ctrl to open in new tab (matches default quick switcher)')
+            .addToggle(toggle => toggle
+                .setValue(settings.createNewFileMod === 'Shift')
+                .onChange(async (value) => {
+                    settings.createNewFileMod = value ? 'Shift' : 'Mod';
+                    settings.openInNewTabMod = value ? 'Mod' : 'Shift';
+                    await this.plugin.saveSettings();
+                })
+            );
+    }
+
+    private createEnhancedSearchSettings(containerEl: HTMLElement): void {
         const searchSettingsPanel = new SearchSettingsPanel(this.plugin, containerEl);
         searchSettingsPanel.display();
     }
 
-    displaySemanticSearchSettings(): void {
-        const { containerEl } = this;
+    private createSemanticSearchSettings(containerEl: HTMLElement): void {
         const { settings } = this.plugin;
 
-        containerEl.createEl('h2', { text: 'Semantic Search Settings' });
-
+        // Enable/Disable Toggle
         new Setting(containerEl)
             .setName('Enable Semantic Search')
-            .setDesc('Enable semantic search using Ollama embeddings')
-            .addToggle((t) => t.setValue(settings.semanticSearch.enableSemanticSearch).onChange(async (val) => {
-                settings.semanticSearch.enableSemanticSearch = val;
-                await this.plugin.saveSettings();
-            }));
+            .setDesc('Activate AI-powered semantic search using Ollama embeddings')
+            .addToggle(toggle => toggle
+                .setValue(settings.semanticSearch.enableSemanticSearch)
+                .onChange(async (value) => {
+                    settings.semanticSearch.enableSemanticSearch = value;
+                    await this.plugin.saveSettings();
+                    this.refreshSemanticSection();
+                })
+            );
 
-        new Setting(containerEl)
+        if (!settings.semanticSearch.enableSemanticSearch) {
+            const infoEl = containerEl.createEl('div', { cls: 'settings-info' });
+            infoEl.createEl('p', { 
+                text: '💡 Semantic search requires Ollama to be installed and running. Enable this feature to configure advanced AI-powered search capabilities.'
+            });
+            return;
+        }
+
+        // Connection Settings
+        const connectionGroup = containerEl.createEl('div', { cls: 'settings-group' });
+        connectionGroup.createEl('h3', { text: 'Connection Settings', cls: 'settings-group-title' });
+
+        new Setting(connectionGroup)
             .setName('Ollama URL')
-            .setDesc('URL of your Ollama server (default: http://localhost:11434)')
-            .addText((t) => t.setValue(settings.semanticSearch.ollamaUrl).onChange(async (val) => {
-                settings.semanticSearch.ollamaUrl = val;
-                await this.plugin.saveSettings();
-            }));
+            .setDesc('URL of your Ollama server')
+            .addText(text => text
+                .setPlaceholder('http://localhost:11434')
+                .setValue(settings.semanticSearch.ollamaUrl)
+                .onChange(async (value) => {
+                    if (this.validateUrl(value)) {
+                        settings.semanticSearch.ollamaUrl = value;
+                        await this.plugin.saveSettings();
+                    }
+                })
+            );
 
-        new Setting(containerEl)
+        // Search Parameters
+        const searchGroup = containerEl.createEl('div', { cls: 'settings-group' });
+        searchGroup.createEl('h3', { text: 'Search Parameters', cls: 'settings-group-title' });
+
+        new Setting(searchGroup)
             .setName('Search Threshold')
-            .setDesc('Minimum similarity score for search results (0.0 to 1.0)')
-            .addSlider((s) => s
-                .setLimits(0, 1, 0.1)
+            .setDesc('Minimum similarity score for search results (lower = more results)')
+            .addSlider(slider => slider
+                .setLimits(0.1, 0.9, 0.05)
                 .setValue(settings.semanticSearch.searchThreshold)
                 .setDynamicTooltip()
-                .onChange(async (val) => {
-                    settings.semanticSearch.searchThreshold = val;
+                .onChange(async (value) => {
+                    settings.semanticSearch.searchThreshold = value;
                     await this.plugin.saveSettings();
-                }));
+                })
+            );
 
-        new Setting(containerEl)
-            .setName('Max Results')
-            .setDesc('Maximum number of results to return')
-            .addText((t) => t
-                .setValue(settings.semanticSearch.maxResults.toString())
-                .onChange(async (val) => {
-                    const num = parseInt(val);
-                    if (!isNaN(num) && num > 0) {
-                        settings.semanticSearch.maxResults = num;
-                        await this.plugin.saveSettings();
-                    }
-                }));
+        new Setting(searchGroup)
+            .setName('Maximum Results')
+            .setDesc('Maximum number of semantic search results to return')
+            .addSlider(slider => slider
+                .setLimits(5, 50, 5)
+                .setValue(settings.semanticSearch.maxResults)
+                .setDynamicTooltip()
+                .onChange(async (value) => {
+                    settings.semanticSearch.maxResults = value;
+                    await this.plugin.saveSettings();
+                })
+            );
 
-        new Setting(containerEl)
+        // Performance Settings
+        const perfGroup = containerEl.createEl('div', { cls: 'settings-group' });
+        perfGroup.createEl('h3', { text: 'Performance Settings', cls: 'settings-group-title' });
+
+        new Setting(perfGroup)
             .setName('Chunk Size')
-            .setDesc('Maximum size of text chunks for embedding (in characters)')
-            .addText((t) => t
-                .setValue(settings.semanticSearch.chunkSize.toString())
-                .onChange(async (val) => {
-                    const num = parseInt(val);
-                    if (!isNaN(num) && num > 0) {
-                        settings.semanticSearch.chunkSize = num;
-                        await this.plugin.saveSettings();
-                    }
-                }));
+            .setDesc('Text chunk size for embedding (larger = more context, slower)')
+            .addSlider(slider => slider
+                .setLimits(500, 2000, 100)
+                .setValue(settings.semanticSearch.chunkSize)
+                .setDynamicTooltip()
+                .onChange(async (value) => {
+                    settings.semanticSearch.chunkSize = value;
+                    await this.plugin.saveSettings();
+                })
+            );
 
-        new Setting(containerEl)
+        new Setting(perfGroup)
             .setName('Max Concurrent Requests')
-            .setDesc('Maximum number of concurrent requests to Ollama')
-            .addText((t) => t
-                .setValue(settings.semanticSearch.maxConcurrentRequests.toString())
-                .onChange(async (val) => {
-                    const num = parseInt(val);
-                    if (!isNaN(num) && num > 0) {
-                        settings.semanticSearch.maxConcurrentRequests = num;
-                        await this.plugin.saveSettings();
-                    }
-                }));
+            .setDesc('Maximum simultaneous requests to Ollama')
+            .addSlider(slider => slider
+                .setLimits(1, 10, 1)
+                .setValue(settings.semanticSearch.maxConcurrentRequests)
+                .setDynamicTooltip()
+                .onChange(async (value) => {
+                    settings.semanticSearch.maxConcurrentRequests = value;
+                    await this.plugin.saveSettings();
+                })
+            );
 
-        new Setting(containerEl)
+        new Setting(perfGroup)
             .setName('Enable Cache')
-            .setDesc('Cache embeddings to improve performance')
-            .addToggle((t) => t.setValue(settings.semanticSearch.cacheEnabled).onChange(async (val) => {
-                settings.semanticSearch.cacheEnabled = val;
-                await this.plugin.saveSettings();
-            }));
+            .setDesc('Cache embeddings to improve performance (recommended)')
+            .addToggle(toggle => toggle
+                .setValue(settings.semanticSearch.cacheEnabled)
+                .onChange(async (value) => {
+                    settings.semanticSearch.cacheEnabled = value;
+                    await this.plugin.saveSettings();
+                })
+            );
 
+        // Exclusion Patterns
         new Setting(containerEl)
             .setName('Exclude Patterns')
-            .setDesc('Glob patterns for files/folders to exclude from indexing (one per line)')
-            .addTextArea((t) => t
-                .setValue(settings.semanticSearch.excludePatterns.join('\n'))
+            .setDesc('File patterns to exclude from semantic indexing (one per line)')
+            .addTextArea(textArea => textArea
                 .setPlaceholder('**/node_modules/**\n**/.git/**\n**/.*/**')
-                .onChange(async (val) => {
-                    settings.semanticSearch.excludePatterns = val
+                .setValue(settings.semanticSearch.excludePatterns.join('\n'))
+                .onChange(async (value) => {
+                    settings.semanticSearch.excludePatterns = value
                         .split('\n')
                         .map(line => line.trim())
                         .filter(line => line.length > 0);
                     await this.plugin.saveSettings();
-                }));
+                })
+            );
 
-        // Add reindex button
-        new Setting(containerEl)
-            .setName('Rebuild Index')
-            .setDesc('Manually rebuild the semantic search index. This may take some time.')
-            .addButton((button) => {
-                button
-                    .setButtonText('Rebuild Index')
-                    .setCta()
-                    .onClick(async () => {
-                        button.setButtonText('Rebuilding...');
-                        button.setDisabled(true);
-                        try {
-                            await this.plugin.reindexSemanticSearch();
-                            new Notice('Semantic search index rebuilt successfully');
-                        } catch (error) {
-                            new Notice(`Failed to rebuild index: ${error.message}`);
-                        } finally {
-                            button.setButtonText('Rebuild Index');
-                            button.setDisabled(false);
-                        }
-                    });
-            });
+        // Actions
+        const actionsGroup = containerEl.createEl('div', { cls: 'settings-group' });
+        actionsGroup.createEl('h3', { text: 'Actions', cls: 'settings-group-title' });
+
+        new Setting(actionsGroup)
+            .setName('Rebuild Semantic Index')
+            .setDesc('Recreate the semantic search index from scratch')
+            .addButton(button => button
+                .setButtonText('Rebuild Index')
+                .setCta()
+                .onClick(async () => {
+                    await this.rebuildSemanticIndex(button);
+                })
+            );
     }
 
-    displayMacroSettings (): void {
-        const { containerEl } = this;
+    private createMacroSettings(containerEl: HTMLElement): void {
         const { settings } = this.plugin;
 
+        if (settings.macros.length === 0) {
+            const emptyEl = containerEl.createEl('div', { cls: 'settings-empty' });
+            emptyEl.createEl('p', { 
+                text: '📝 No macros created yet. Macros allow you to chain multiple commands together for quick execution.'
+            });
+        }
+
+        // Add new macro button
+        new Setting(containerEl)
+            .setName('Create New Macro')
+            .setDesc('Add a new command sequence macro')
+            .addButton(button => button
+                .setButtonText('+ Add Macro')
+                .setCta()
+                .onClick(async () => {
+                    await this.createNewMacro();
+                })
+            );
+
+        // Display existing macros
         settings.macros.forEach((macro, index) => {
-            const topLevelSetting = new Setting(containerEl)
-                .setClass('macro-setting')
-                .setName(`Macro #${index + 1}`)
-                .addButton((button) => button
-                    .setButtonText('Delete Macro')
-                    .onClick(async () => {
-                        settings.macros.splice(index, 1);
-                        await this.plugin.saveSettings();
-                        this.display();
-                    }));
+            this.createMacroSetting(containerEl, macro, index);
+        });
+    }
 
-            const mainSettingsEl = topLevelSetting.settingEl.createEl('div', 'macro-main-settings');
+    private createAdvancedSettings(containerEl: HTMLElement): void {
+        const { settings } = this.plugin;
 
-            mainSettingsEl.createEl('label', { text: 'Macro Name' });
-            mainSettingsEl.createEl('input', {
-                cls: 'name-input',
-                type: 'text',
-                value: macro.name,
-            }).on('change', '.name-input', async (evt: Event) => {
-                const target = evt.target as HTMLInputElement;
-                settings.macros[index] = { ...macro, name: target.value };
-                await this.plugin.saveSettings();
-            });
+        // File Type Exclusions
+        const exclusionGroup = containerEl.createEl('div', { cls: 'settings-group' });
+        exclusionGroup.createEl('h3', { text: 'File Exclusions', cls: 'settings-group-title' });
 
-            mainSettingsEl.createEl('label', { text: 'Delay (ms)' });
-            mainSettingsEl.createEl('input', {
-                cls: 'delay-input',
-                type: 'number',
-                value: macro.delay.toString(),
-            }).on('change', '.delay-input', async (evt: Event) => {
-                const target = evt.target as HTMLInputElement;
-                const delayStr = target.value;
-                settings.macros[index].delay = parseInt(delayStr, 10);
-                await this.plugin.saveSettings();
-            });
-
-            mainSettingsEl.createEl('label', { text: 'Add a new Command to the macro' });
-            mainSettingsEl.createEl('button', { text: 'Add Command' }).onClickEvent(async () => {
-                const suggestModal = new SettingsCommandSuggestModal(
-                    this.app,
-                    async (item: Command) => {
-                        settings.macros[index].commandIds.push(item.id);
-                        await this.plugin.saveSettings();
-                        this.display();
-                    },
-                );
-                suggestModal.open();
-            });
-
-            macro.commandIds.forEach((id, cIndex) => {
-                const command = this.app.commands.findCommand(id);
-                const commandEl = topLevelSetting.settingEl.createEl('div', 'macro-command');
-
-                const buttonEl = commandEl.createEl('button', `delete-command-${cIndex}`);
-
-                commandEl.createEl('p', { text: `${cIndex + 1}: ${command.name}`, cls: 'command' });
-
-                setIcon(buttonEl, 'trash');
-                buttonEl.onClickEvent(async () => {
-                    settings.macros[index].commandIds.splice(cIndex, 1);
+        new Setting(exclusionGroup)
+            .setName('Excluded File Types')
+            .setDesc('Comma-separated list of file extensions to exclude from search (e.g., pdf,jpg,png)')
+            .addText(text => text
+                .setPlaceholder('pdf,jpg,png,gif,svg')
+                .setValue(settings.fileTypeExclusion.join(','))
+                .onChange(async (value) => {
+                    const extensions = value
+                        .split(',')
+                        .map(ext => ext.trim().toLowerCase())
+                        .filter(ext => ext.length > 0);
+                    settings.fileTypeExclusion = extensions;
                     await this.plugin.saveSettings();
-                    this.display();
+                })
+            );
+
+        // Hidden Items Management
+        const hiddenGroup = containerEl.createEl('div', { cls: 'settings-group' });
+        hiddenGroup.createEl('h3', { text: 'Hidden Items', cls: 'settings-group-title' });
+
+        this.createHiddenItemsSetting(hiddenGroup, 'Commands', settings.hiddenCommands, 'hiddenCommands');
+        this.createHiddenItemsSetting(hiddenGroup, 'Files', settings.hiddenFiles, 'hiddenFiles');
+        this.createHiddenItemsSetting(hiddenGroup, 'Tags', settings.hiddenTags, 'hiddenTags');
+
+        // Reset Section
+        const resetGroup = containerEl.createEl('div', { cls: 'settings-group' });
+        resetGroup.createEl('h3', { text: 'Reset Options', cls: 'settings-group-title' });
+
+        new Setting(resetGroup)
+            .setName('Reset All Settings')
+            .setDesc('⚠️ Reset all plugin settings to default values')
+            .addButton(button => button
+                .setButtonText('Reset All')
+                .setWarning()
+                .onClick(async () => {
+                    await this.resetAllSettings();
+                })
+            );
+    }
+
+    // Helper methods
+
+    private validatePrefix(prefix: string): boolean {
+        if (!prefix || prefix.length !== 1) {
+            new Notice('Search prefix must be exactly one character');
+            return false;
+        }
+        return true;
+    }
+
+    private validateUrl(url: string): boolean {
+        try {
+            new URL(url);
+            return true;
+        } catch {
+            new Notice('Please enter a valid URL');
+            return false;
+        }
+    }
+
+    private refreshSemanticSection(): void {
+        const sectionEl = this.sectionElements.get('semantic-search');
+        if (sectionEl) {
+            sectionEl.empty();
+            this.createSemanticSearchSettings(sectionEl);
+        }
+    }
+
+    private async rebuildSemanticIndex(button: HTMLButtonElement): Promise<void> {
+        const originalText = button.textContent;
+        button.textContent = 'Rebuilding...';
+        button.setDisabled(true);
+
+        try {
+            await this.plugin.reindexSemanticSearch();
+            new Notice('✅ Semantic search index rebuilt successfully');
+            logger.info('Semantic search index rebuilt successfully');
+        } catch (error) {
+            const errorMsg = `Failed to rebuild index: ${error.message}`;
+            new Notice(`❌ ${errorMsg}`);
+            logger.error('Failed to rebuild semantic search index', error);
+        } finally {
+            button.textContent = originalText;
+            button.setDisabled(false);
+        }
+    }
+
+    private async createNewMacro(): Promise<void> {
+        const newMacro: MacroCommandInterface = {
+            name: `Macro ${this.plugin.settings.macros.length + 1}`,
+            commandIds: [],
+            delay: 100
+        };
+
+        this.plugin.settings.macros.push(newMacro);
+        await this.plugin.saveSettings();
+        this.refreshMacroSection();
+    }
+
+    private createMacroSetting(containerEl: HTMLElement, macro: MacroCommandInterface, index: number): void {
+        const macroContainer = containerEl.createEl('div', { cls: 'macro-container' });
+        
+        // Macro header
+        const headerSetting = new Setting(macroContainer)
+            .setName(`🔗 ${macro.name}`)
+            .setDesc(`${macro.commandIds.length} commands • ${macro.delay}ms delay`)
+            .addButton(button => button
+                .setButtonText('Delete')
+                .setWarning()
+                .onClick(async () => {
+                    await this.deleteMacro(index);
+                })
+            );
+
+        // Macro details
+        const detailsEl = macroContainer.createEl('div', { cls: 'macro-details' });
+        
+        new Setting(detailsEl)
+            .setName('Macro Name')
+            .addText(text => text
+                .setValue(macro.name)
+                .onChange(async (value) => {
+                    if (value.trim()) {
+                        this.plugin.settings.macros[index].name = value;
+                        await this.plugin.saveSettings();
+                        this.refreshMacroSection();
+                    }
+                })
+            );
+
+        new Setting(detailsEl)
+            .setName('Delay Between Commands (ms)')
+            .addSlider(slider => slider
+                .setLimits(0, 1000, 50)
+                .setValue(macro.delay)
+                .setDynamicTooltip()
+                .onChange(async (value) => {
+                    this.plugin.settings.macros[index].delay = value;
+                    await this.plugin.saveSettings();
+                })
+            );
+
+        // Commands list
+        if (macro.commandIds.length > 0) {
+            const commandsEl = detailsEl.createEl('div', { cls: 'macro-commands' });
+            commandsEl.createEl('h4', { text: 'Commands:', cls: 'macro-commands-title' });
+            
+            macro.commandIds.forEach((commandId, commandIndex) => {
+                const command = this.app.commands.findCommand(commandId);
+                const commandEl = commandsEl.createEl('div', { cls: 'macro-command-item' });
+                
+                commandEl.createEl('span', { 
+                    text: `${commandIndex + 1}. ${command?.name || 'Unknown Command'}`,
+                    cls: 'macro-command-name'
+                });
+                
+                const removeBtn = commandEl.createEl('button', { 
+                    cls: 'macro-command-remove' 
+                });
+                setIcon(removeBtn, 'trash');
+                removeBtn.addEventListener('click', async () => {
+                    await this.removeCommandFromMacro(index, commandIndex);
                 });
             });
-        });
+        }
+
+        // Add command button
+        new Setting(detailsEl)
+            .setName('Add Command')
+            .addButton(button => button
+                .setButtonText('+ Add Command')
+                .onClick(async () => {
+                    await this.addCommandToMacro(index);
+                })
+            );
+    }
+
+    private async deleteMacro(index: number): Promise<void> {
+        this.plugin.settings.macros.splice(index, 1);
+        await this.plugin.saveSettings();
+        this.refreshMacroSection();
+    }
+
+    private async removeCommandFromMacro(macroIndex: number, commandIndex: number): Promise<void> {
+        this.plugin.settings.macros[macroIndex].commandIds.splice(commandIndex, 1);
+        await this.plugin.saveSettings();
+        this.refreshMacroSection();
+    }
+
+    private async addCommandToMacro(macroIndex: number): Promise<void> {
+        const modal = new SettingsCommandSuggestModal(
+            this.app,
+            async (command: Command) => {
+                this.plugin.settings.macros[macroIndex].commandIds.push(command.id);
+                await this.plugin.saveSettings();
+                this.refreshMacroSection();
+            }
+        );
+        modal.open();
+    }
+
+    private refreshMacroSection(): void {
+        const sectionEl = this.sectionElements.get('macros');
+        if (sectionEl) {
+            sectionEl.empty();
+            this.createMacroSettings(sectionEl);
+        }
+    }
+
+    private createHiddenItemsSetting(
+        containerEl: HTMLElement, 
+        type: string, 
+        items: string[], 
+        settingsKey: keyof BetterCommandPalettePluginSettings
+    ): void {
+        new Setting(containerEl)
+            .setName(`Hidden ${type}`)
+            .setDesc(`${items.length} ${type.toLowerCase()} currently hidden`)
+            .addButton(button => button
+                .setButtonText(`Manage Hidden ${type}`)
+                .onClick(() => {
+                    // TODO: Implement hidden items management modal
+                    new Notice(`Hidden ${type} management coming soon`);
+                })
+            );
+    }
+
+    private async resetAllSettings(): Promise<void> {
+        const confirmed = confirm(
+            'Are you sure you want to reset all settings to their default values? This action cannot be undone.'
+        );
+        
+        if (confirmed) {
+            this.plugin.settings = { ...DEFAULT_SETTINGS };
+            await this.plugin.saveSettings();
+            this.display();
+            new Notice('✅ All settings have been reset to defaults');
+        }
     }
 }
