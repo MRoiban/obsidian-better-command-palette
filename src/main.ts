@@ -30,7 +30,7 @@ export default class BetterCommandPalettePlugin extends Plugin {
         this.suggestionsWorker = new SuggestionsWorker({});
 
         this.addCommand({
-            id: 'open-better-commmand-palette',
+            id: 'open-better-command-palette',
             name: 'Open better command palette',
             // Generally I would not set a hotkey, but since it is a
             // command palette I think it makes sense
@@ -48,7 +48,7 @@ export default class BetterCommandPalettePlugin extends Plugin {
         });
 
         this.addCommand({
-            id: 'open-better-commmand-palette-file-search',
+            id: 'open-better-command-palette-file-search',
             name: 'Open better command palette: File Search',
             hotkeys: [],
             callback: () => {
@@ -64,7 +64,7 @@ export default class BetterCommandPalettePlugin extends Plugin {
         });
 
         this.addCommand({
-            id: 'open-better-commmand-palette-tag-search',
+            id: 'open-better-command-palette-tag-search',
             name: 'Open better command palette: Tag Search',
             hotkeys: [],
             callback: () => {

@@ -1,4 +1,4 @@
-import { Command, Instruction, setIcon } from 'obsidian';
+import { Command, Instruction, Notice, setIcon } from 'obsidian';
 import {
     generateHotKeyText, PaletteMatch, SuggestModalAdapter,
 } from 'src/utils';
@@ -115,7 +115,19 @@ export default class BetterCommandPaletteCommandAdapter extends SuggestModalAdap
     }
 
     async onChooseSuggestion(match: Match) {
-        this.getPrevItems().add(match);
-        this.app.commands.executeCommandById(match.id);
+        try {
+            this.getPrevItems().add(match);
+            
+            // Validate command exists before executing
+            const command = this.app.commands.findCommand(match.id);
+            if (!command) {
+                throw new Error(`Command not found: ${match.id}`);
+            }
+            
+            this.app.commands.executeCommandById(match.id);
+        } catch (error) {
+            console.error('Error executing command:', error);
+            new Notice(`Failed to execute command: ${error.message}`);
+        }
     }
 }

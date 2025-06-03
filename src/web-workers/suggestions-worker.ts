@@ -6,25 +6,52 @@ import { Message } from 'src/types/types';
 import { matchTag } from 'src/utils';
 import { QUERY_OR, QUERY_TAG } from 'src/utils/constants';
 
-self.onmessage = (msg: Message) => {
-    const { query, items } = msg.data;
+self.onmessage = (msg: MessageEvent) => {
+    try {
+        // Validate message structure
+        if (!msg.data || typeof msg.data !== 'object') {
+            console.warn('Invalid message received by suggestions worker');
+            self.postMessage([]);
+            return;
+        }
 
-    const [mainQuery, ...tagQueries] = query.split(QUERY_TAG);
+        const { query, items } = msg.data;
+        
+        // Validate input data
+        if (!items || !Array.isArray(items)) {
+            console.warn('Invalid items array received by suggestions worker');
+            self.postMessage([]);
+            return;
+        }
 
-    let results = items;
+        if (typeof query !== 'string') {
+            console.warn('Invalid query received by suggestions worker');
+            self.postMessage([]);
+            return;
+        }
 
-    if (mainQuery.includes(QUERY_OR)) {
-        const subqueries = mainQuery.split(QUERY_OR).map((q) => q.trim());
-        results = items.filter((item) => subqueries.some((sq) => item.text.includes(sq)));
-    } else if (mainQuery !== '') {
-        results = fuzzySearch
-            .go(mainQuery, items, { key: 'text' })
-            .map((r) => r.obj);
+        const [mainQuery, ...tagQueries] = query.split(QUERY_TAG);
+
+        let results = items;
+
+        if (mainQuery.includes(QUERY_OR)) {
+            const subqueries = mainQuery.split(QUERY_OR).map((q) => q.trim());
+            results = items.filter((item) => subqueries.some((sq) => item.text.includes(sq)));
+        } else if (mainQuery !== '') {
+            results = fuzzySearch
+                .go(mainQuery, items, { key: 'text' })
+                .map((r) => r.obj);
+        }
+
+        if (tagQueries.length) {
+            results = results.filter((r) => matchTag(r.tags, tagQueries));
+        }
+
+        return self.postMessage(results);
+        
+    } catch (error) {
+        console.error('Worker error:', error);
+        // Always return empty array on error to prevent UI breakage
+        self.postMessage([]);
     }
-
-    if (tagQueries.length) {
-        results = results.filter((r) => matchTag(r.tags, tagQueries));
-    }
-
-    return self.postMessage(results);
 };

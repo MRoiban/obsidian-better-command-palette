@@ -70,20 +70,56 @@ export function getCommandText (item: Command): string {
     return item.name;
 }
 
-export async function getOrCreateFile (app: App, path: string): Promise<TFile> {
+/**
+ * Validates and sanitizes user input for file paths
+ */
+export function validateFilePath(path: string): string {
+    if (!path || typeof path !== 'string') {
+        throw new Error('File path must be a non-empty string');
+    }
+
+    const sanitized = path.trim();
+    
+    if (!sanitized) {
+        throw new Error('File path cannot be empty');
+    }
+
+    // Check for invalid characters (basic validation)
+    const invalidChars = /[<>:"|?*]/;
+    if (invalidChars.test(sanitized)) {
+        throw new Error('File path contains invalid characters');
+    }
+
+    return sanitized;
+}
+
+export async function getOrCreateFile(app: App, path: string): Promise<TFile> {
     let file = app.metadataCache.getFirstLinkpathDest(path, '');
 
     if (!file) {
         const normalizedPath = normalizePath(`${path}.md`);
         const dirOnlyPath = normalizedPath.split('/').slice(0, -1).join('/');
 
-        try {
-            await app.vault.createFolder(dirOnlyPath);
-        } catch (e) {
-            // An error just means the folder path already exists
+        // Create directory if needed
+        if (dirOnlyPath) {
+            try {
+                await app.vault.createFolder(dirOnlyPath);
+            } catch (e) {
+                // Only ignore "folder already exists" errors
+                if (!e.message?.includes('already exists') && !e.message?.includes('Folder already exists')) {
+                    console.error('Failed to create directory:', e);
+                    throw new Error(`Could not create directory: ${dirOnlyPath}`);
+                }
+            }
         }
 
-        file = await app.vault.create(normalizedPath, '');
+        // Create file with better error handling
+        try {
+            file = await app.vault.create(normalizedPath, '');
+        } catch (e) {
+            console.error('Failed to create file:', e);
+            throw new Error(`Could not create file: ${normalizedPath}. ${e.message || 'Unknown error'}`);
+        }
     }
 
     return file;

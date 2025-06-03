@@ -1,5 +1,5 @@
 import {
-    Instruction, setIcon,
+    Instruction, Notice, setIcon,
 } from 'obsidian';
 import {
     generateHotKeyText,
@@ -43,6 +43,11 @@ export default class BetterCommandPaletteFileAdapter extends SuggestModalAdapter
         // Actually returns all files in the cache even if there are no unresolved links
         this.app.metadataCache.getCachedFiles()
             .forEach((filePath: string) => {
+                // Validate file path
+                if (!filePath || typeof filePath !== 'string') {
+                    return;
+                }
+
                 const badfileType = this.plugin.settings.fileTypeExclusion.some((suf) => filePath.endsWith(`.${suf}`));
 
                 // If we shouldn't show the file type just return right now
@@ -51,10 +56,15 @@ export default class BetterCommandPaletteFileAdapter extends SuggestModalAdapter
                 const matches = createPaletteMatchesFromFilePath(this.app.metadataCache, filePath);
                 this.allItems = this.allItems.concat(matches);
 
-                // Add any unresolved links to the set
-                Object.keys(this.app.metadataCache.unresolvedLinks[filePath] || {}).forEach(
-                    (p) => this.unresolvedItems.add(new PaletteMatch(p, p)),
-                );
+                // Add unresolved links with validation
+                const unresolvedLinks = this.app.metadataCache.unresolvedLinks[filePath];
+                if (unresolvedLinks && typeof unresolvedLinks === 'object') {
+                    Object.keys(unresolvedLinks).forEach((p) => {
+                        if (p && typeof p === 'string' && p.trim()) {
+                            this.unresolvedItems.add(new PaletteMatch(p, p));
+                        }
+                    });
+                }
             });
 
         // Add the deduped links to all items
@@ -141,22 +151,36 @@ export default class BetterCommandPaletteFileAdapter extends SuggestModalAdapter
     async onChooseSuggestion (match: Match, event: MouseEvent | KeyboardEvent) {
         let path = match && match.id;
 
-        // No match means we are trying to create new file
-        if (!match) {
-            const el = event.target as HTMLInputElement;
-            path = el.value.replace(this.fileSearchPrefix, '');
-        } else if (path.includes(':')) {
-            // If the path is an aliase, remove the alias prefix
-            [, path] = path.split(':');
+        try {
+            // No match means we are trying to create new file
+            if (!match) {
+                const el = event.target as HTMLInputElement;
+                if (!el || !el.value) {
+                    throw new Error('No file path provided');
+                }
+                path = el.value.replace(this.fileSearchPrefix, '');
+            } else if (path.includes(':')) {
+                // If the path is an alias, remove the alias prefix
+                [, path] = path.split(':');
+            }
+
+            if (!path || !path.trim()) {
+                throw new Error('Invalid file path');
+            }
+
+            const file = await getOrCreateFile(this.app, path);
+
+            // We might not have a file if only a directory was specified
+            if (file) {
+                this.getPrevItems().add(match || new PaletteMatch(file.path, file.path));
+                openFileWithEventKeys(this.app, this.plugin.settings, file, event);
+            } else {
+                console.warn('No file was created or found');
+            }
+        } catch (error) {
+            console.error('Error choosing file suggestion:', error);
+            // Show user-friendly error message
+            new Notice(`Failed to open/create file: ${error.message}`);
         }
-
-        const file = await getOrCreateFile(this.app, path);
-
-        // We might not have a file if only a directory was specified
-        if (file) {
-            this.getPrevItems().add(match || new PaletteMatch(file.path, file.path));
-        }
-
-        openFileWithEventKeys(this.app, this.plugin.settings, file, event);
     }
 }

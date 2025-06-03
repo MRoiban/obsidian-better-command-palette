@@ -165,9 +165,15 @@ class BetterCommandPaletteModal extends SuggestModal<Match> implements UnsafeSug
             if (this.actionType === ActionType.Files && this.currentSuggestions.length) {
                 const promptResults = document.querySelector(".better-command-palette .prompt-results");
                 const selected = document.querySelector(".better-command-palette .is-selected");
-                const selectedIndex = Array.from(promptResults.children).indexOf(selected);
-                this.currentAdapter.onChooseSuggestion(this.currentSuggestions[selectedIndex], event);
-                this.close(event);
+                
+                // Add null checks to prevent runtime errors
+                if (promptResults && selected) {
+                    const selectedIndex = Array.from(promptResults.children).indexOf(selected);
+                    if (selectedIndex >= 0 && selectedIndex < this.currentSuggestions.length) {
+                        this.currentAdapter.onChooseSuggestion(this.currentSuggestions[selectedIndex], event);
+                        this.close(event);
+                    }
+                }
             }
         });
 
