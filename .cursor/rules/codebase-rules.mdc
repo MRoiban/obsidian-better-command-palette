@@ -1,11 +1,12 @@
 ---
 description: 
-globs: 
+globs: *.ts,*.tsx,*.js
 alwaysApply: false
 ---
-- use bun instead of npm
+- use `bun` instead of `npm`
 - you are allowed to auto run the command:
     ```sh
     bun run build
     ```
+- use the [logger.ts](mdc:src/utils/logger.ts) instead of `console`
 - 
