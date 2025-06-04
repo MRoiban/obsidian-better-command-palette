@@ -33,6 +33,11 @@ export interface BetterCommandPalettePluginSettings {
     fileTypeExclusion: string[],
     enhancedSearch: SearchSettings,
     semanticSearch: SemanticSearchSettings,
+    quickLink: {
+        enabled: boolean,
+        defaultHotkey: string,
+        autoCloseModal: boolean,
+    },
 }
 
 export const DEFAULT_SETTINGS: BetterCommandPalettePluginSettings = {
@@ -86,7 +91,12 @@ export const DEFAULT_SETTINGS: BetterCommandPalettePluginSettings = {
         maxConcurrentRequests: 3,
         cacheEnabled: true,
         excludePatterns: ['**/node_modules/**', '**/.git/**', '**/.*/**', '**/*.excalidraw.md', '**/*.sfile.md'] // Default exclusions
-    }
+    },
+    quickLink: {
+        enabled: true,
+        defaultHotkey: 'l',
+        autoCloseModal: true,
+    },
 };
 
 interface SettingsSection {
@@ -120,6 +130,12 @@ export class BetterCommandPaletteSettingTab extends PluginSettingTab {
                 id: 'search',
                 title: 'Search & Navigation',
                 description: 'Configure search prefixes, hotkeys, and display options',
+                collapsed: false
+            },
+            {
+                id: 'quick-link',
+                title: 'Quick Link',
+                description: 'Create links from selected text with file search',
                 collapsed: false
             },
             {
@@ -250,6 +266,9 @@ export class BetterCommandPaletteSettingTab extends PluginSettingTab {
                 break;
             case 'search':
                 this.createSearchSettings(containerEl);
+                break;
+            case 'quick-link':
+                this.createQuickLinkSettings(containerEl);
                 break;
             case 'enhanced-search':
                 this.createEnhancedSearchSettings(containerEl);
@@ -414,6 +433,46 @@ export class BetterCommandPaletteSettingTab extends PluginSettingTab {
                 .onChange(async (value) => {
                     settings.createNewFileMod = value ? 'Shift' : 'Mod';
                     settings.openInNewTabMod = value ? 'Mod' : 'Shift';
+                    await this.plugin.saveSettings();
+                })
+            );
+    }
+
+    private createQuickLinkSettings(containerEl: HTMLElement): void {
+        const { settings } = this.plugin;
+
+        new Setting(containerEl)
+            .setName('Quick Link Enabled')
+            .setDesc('Enable quick link creation from selected text')
+            .addToggle(toggle => toggle
+                .setValue(settings.quickLink.enabled)
+                .onChange(async (value) => {
+                    settings.quickLink.enabled = value;
+                    await this.plugin.saveSettings();
+                })
+            );
+
+        new Setting(containerEl)
+            .setName('Quick Link Default Hotkey')
+            .setDesc('Hotkey to trigger quick link creation')
+            .addText(text => text
+                .setPlaceholder('l')
+                .setValue(settings.quickLink.defaultHotkey)
+                .onChange(async (value) => {
+                    if (value.trim()) {
+                        settings.quickLink.defaultHotkey = value;
+                        await this.plugin.saveSettings();
+                    }
+                })
+            );
+
+        new Setting(containerEl)
+            .setName('Auto Close Quick Link Modal')
+            .setDesc('Automatically close quick link modal after opening')
+            .addToggle(toggle => toggle
+                .setValue(settings.quickLink.autoCloseModal)
+                .onChange(async (value) => {
+                    settings.quickLink.autoCloseModal = value;
                     await this.plugin.saveSettings();
                 })
             );

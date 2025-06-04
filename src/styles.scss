@@ -1023,3 +1023,25 @@
         gap: 0.75rem;
     }
 }
+
+/* Quick Link Modal Styles - Now uses same styles as file search */
+
+.quick-link-modal {
+    /* Inherits all file search modal styles - no custom styling needed */
+}
+
+/* Animation for Quick Link creation */
+@keyframes quickLinkCreated {
+    0% {
+        background: rgba(var(--color-accent-rgb), 0.2);
+        transform: scale(1.02);
+    }
+    100% {
+        background: transparent;
+        transform: scale(1);
+    }
+}
+
+.quick-link-created {
+    animation: quickLinkCreated 0.3s ease;
+}

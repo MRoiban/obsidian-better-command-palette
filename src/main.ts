@@ -8,6 +8,7 @@ import { BetterCommandPalettePluginSettings, BetterCommandPaletteSettingTab, DEF
 import { MACRO_COMMAND_ID_PREFIX } from './utils/constants';
 import { EnhancedSearchService } from './search/enhanced-search-service';
 import { EmbeddingService, SemanticSearchEngine, SemanticSearchModal, SemanticIndexingCoordinator } from './search/semantic';
+import { QuickLinkModal } from './ui/quick-link-modal';
 import { logger } from './utils/logger';
 import './styles.scss';
 
@@ -196,6 +197,32 @@ export default class BetterCommandPalettePlugin extends Plugin {
                 } else {
                     new Notice('Semantic search is not initialized');
                 }
+            },
+        });
+
+        // Add Quick Link command
+        this.addCommand({
+            id: 'create-quick-link',
+            name: 'Create quick link from selection',
+            hotkeys: this.settings.quickLink.enabled ? [{ modifiers: ['Mod', 'Shift'], key: this.settings.quickLink.defaultHotkey }] : [],
+            editorCallback: (editor, view) => {
+                if (!this.settings.quickLink.enabled) {
+                    new Notice('Quick Link feature is disabled in settings');
+                    return;
+                }
+                
+                const selectedText = editor.getSelection();
+                if (!selectedText) {
+                    new Notice('Please select text first');
+                    return;
+                }
+                
+                if (!view.file) {
+                    new Notice('No active file');
+                    return;
+                }
+                
+                new QuickLinkModal(this.app, this, selectedText, view.file, editor).open();
             },
         });
 
