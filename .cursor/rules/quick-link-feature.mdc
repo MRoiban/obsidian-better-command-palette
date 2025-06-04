@@ -1,0 +1,125 @@
+---
+description: Quick Link Feature Implementation Plan
+globs: 
+alwaysApply: false
+---
+# Quick Link Feature Implementation Plan
+
+## Overview
+The Quick Link feature allows users to:
+1. Select text in any note
+2. Press a hotkey (e.g., `Ctrl+Shift+L`)
+3. Open a modal to search for another note
+4. Create a link: `[[selected-note|selected-text]]`
+
+## Key Files to Reference
+
+### Main Plugin Entry Point
+- [main.ts](mdc:src/main.ts) - Add new command registration here
+- [settings.ts](mdc:src/settings.ts) - Add configuration options
+- [styles.scss](mdc:src/styles.scss) - Add modal styling
+
+### Existing Modal Implementations to Study
+- [palette.ts](mdc:src/palette.ts) - Main command palette modal structure
+- [semantic-search-modal.ts](mdc:src/search/semantic/semantic-search-modal.ts) - Example of custom modal
+- [enhanced-file-adapter.ts](mdc:src/palette-modal-adapters/enhanced-file-adapter.ts) - File search functionality
+
+### Type Definitions
+- [types.d.ts](mdc:src/types/types.d.ts) - Existing interfaces and Match type
+
+## Implementation Steps
+
+### Phase 1: Create Quick Link Modal
+Create `src/ui/quick-link-modal.ts` extending `SuggestModal<Match>`:
+
+```typescript
+export class QuickLinkModal extends SuggestModal<Match> {
+  private selectedText: string;
+  private sourceFile: TFile;
+  private plugin: BetterCommandPalettePlugin;
+  
+  constructor(app: App, plugin: BetterCommandPalettePlugin, selectedText: string, sourceFile: TFile) {
+    // Initialize modal with file search capabilities
+    // Reuse existing EnhancedFileAdapter for search functionality
+  }
+}
+```
+
+### Phase 2: Add Command Registration
+In [main.ts](mdc:src/main.ts), add the command:
+
+```typescript
+this.addCommand({
+  id: 'create-quick-link',
+  name: 'Create quick link from selection',
+  hotkeys: [{ modifiers: ['Mod', 'Shift'], key: 'l' }],
+  editorCallback: (editor: Editor, view: MarkdownView) => {
+    const selectedText = editor.getSelection();
+    if (!selectedText) {
+      new Notice('Please select text first');
+      return;
+    }
+    new QuickLinkModal(this.app, this, selectedText, view.file).open();
+  }
+});
+```
+
+### Phase 3: Search Integration
+- Leverage existing [enhanced-file-adapter.ts](mdc:src/palette-modal-adapters/enhanced-file-adapter.ts) for file searching
+- Use [enhanced-search-service.ts](mdc:src/search/enhanced-search-service.ts) for indexed search performance
+- Optionally integrate with semantic search using [embedding-service.ts](mdc:src/search/semantic/embedding-service.ts)
+
+### Phase 4: Link Creation Logic
+```typescript
+private insertLink(targetFile: TFile, selectedText: string): void {
+  const link = this.app.fileManager.generateMarkdownLink(
+    targetFile, 
+    this.sourceFile.path,
+    '#',
+    selectedText  // This becomes the alias
+  );
+  // Replace selected text with the link
+  this.activeEditor.replaceSelection(link);
+}
+```
+
+### Phase 5: UI and Styling
+- Follow patterns from [palette.ts](mdc:src/palette.ts) for modal structure
+- Use existing CSS classes from [styles.scss](mdc:src/styles.scss)
+- Match the visual design of existing modals
+
+## Technical Considerations
+
+### Reuse Existing Infrastructure
+- **Search System**: Use [enhanced-file-adapter.ts](mdc:src/palette-modal-adapters/enhanced-file-adapter.ts) for consistent file searching
+- **Modal Framework**: Follow patterns from [palette.ts](mdc:src/palette.ts) and [semantic-search-modal.ts](mdc:src/search/semantic/semantic-search-modal.ts)
+- **Settings**: Integrate with existing settings structure in [settings.ts](mdc:src/settings.ts)
+- **Types**: Extend existing `Match` interface from [types.d.ts](mdc:src/types/types.d.ts)
+
+### Performance Optimizations
+- Leverage existing indexing from [enhanced-search-service.ts](mdc:src/search/enhanced-search-service.ts)
+- Use semantic search when available via [embedding-service.ts](mdc:src/search/semantic/embedding-service.ts)
+- Follow existing patterns for async search operations
+
+### User Experience
+- **Consistency**: Match existing modal behavior and keyboard shortcuts
+- **Feedback**: Use existing Notice system for user feedback
+- **Error Handling**: Follow patterns established in other modal implementations
+- **Accessibility**: Maintain keyboard navigation support
+
+## File Structure
+```
+src/
+├── ui/
+│   └── quick-link-modal.ts          # New modal implementation
+├── main.ts                          # Add command registration
+├── settings.ts                      # Add feature settings
+└── styles.scss                      # Add modal styles
+```
+
+## Settings Integration
+Add to [settings.ts](mdc:src/settings.ts):
+- Enable/disable quick link feature
+- Customize hotkey
+- Configure search behavior preferences
+- Integration with existing semantic search settings

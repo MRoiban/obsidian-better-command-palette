@@ -9,6 +9,7 @@ Quick Feature List:
 5. Search files with specific tags
 6. Macro commands
 7. Hide less useful Commands, Files, and Tag, but quickly see them again with `cmd+i`
+8. **Quick Link creation from selected text**
 
 Coming Soon:
 1. Populate the input with recent queries automatically
@@ -23,6 +24,19 @@ Choices that have been recently used will bubble up to the top of the command li
 
 ### Pinned Commands
 Commands that have been pinned in the default `Command Palette` will be pinned here as well.
+
+### Quick Link Creation
+Better Command Palette allows you to quickly create links from selected text. Select any text in your note, press `cmd+shift+l` (configurable in settings), and a file search modal will open. Choose a target file and a link will be created in the format `[[target-file|selected-text]]`.
+
+**Features:**
+- **Identical UI**: Uses the exact same interface as the file search modal
+- **Smart Search**: Uses enhanced file search when available, falls back to fuzzy search
+- **Recent Files**: Shows recently accessed files first when no query is entered
+- **New File Creation**: Press `ctrl+enter` to create a new file and link to it
+- **Unresolved Links**: Create unresolved links for files that don't exist yet
+- **Customizable**: Enable/disable, change hotkey, and toggle auto-close behavior
+- **File Type Icons**: Visual indicators for different file types
+- **Path Intelligence**: Shows folder structure for better file identification
 
 ### File Opening
 Better Command Palette allows you to open files from the same input without needing to run a command or press `cmd+o first`. Once the palette is open just type `/` (This can be changed in the settings) and you will be searching files to open. Press `enter` to open the file.
