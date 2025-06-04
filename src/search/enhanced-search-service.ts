@@ -452,8 +452,7 @@ export class EnhancedSearchService {
         // Watch for file renames
         this.app.vault.on('rename', (file: TFile, oldPath: string) => {
             if (file instanceof TFile && file.extension === 'md') {
-                this.handleFileChange(oldPath, 'delete');
-                this.handleFileChange(file.path, 'create');
+                this.handleFileRename(oldPath, file.path);
             }
         });
     }
@@ -498,6 +497,44 @@ export class EnhancedSearchService {
             }
         } catch (error) {
             logger.error(`Failed to handle file change for ${filePath}:`, error);
+        }
+    }
+
+    private async handleFileRename(oldPath: string, newPath: string): Promise<void> {
+        try {
+            // Skip indexing if paused
+            if (this.indexingPaused) {
+                logger.debug(`Enhanced search: Skipping rename for ${oldPath} to ${newPath} (indexing paused)`);
+                return;
+            }
+            
+            // Use requestIdleCallback with a longer timeout to ensure indexing happens
+            // during idle periods, preventing UI lag during active file switching
+            const scheduleIndexing = () => {
+                if ('requestIdleCallback' in window) {
+                    requestIdleCallback(async () => {
+                        try {
+                            await this.indexingCoordinator.renameFile(oldPath, newPath);
+                        } catch (error) {
+                            logger.error(`Failed to handle file rename for ${oldPath} to ${newPath}:`, error);
+                        }
+                    }, { timeout: 2000 }); // 2 second timeout for important updates
+                } else {
+                    // Fallback for environments without requestIdleCallback
+                    setTimeout(async () => {
+                        try {
+                            await this.indexingCoordinator.renameFile(oldPath, newPath);
+                        } catch (error) {
+                            logger.error(`Failed to handle file rename for ${oldPath} to ${newPath}:`, error);
+                        }
+                    }, 50); // Small delay to let UI update first
+                }
+            };
+
+            // Schedule the rename operation
+            scheduleIndexing();
+        } catch (error) {
+            logger.error(`Failed to handle file rename for ${oldPath} to ${newPath}:`, error);
         }
     }
 

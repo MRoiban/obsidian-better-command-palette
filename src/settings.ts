@@ -453,20 +453,6 @@ export class BetterCommandPaletteSettingTab extends PluginSettingTab {
             );
 
         new Setting(containerEl)
-            .setName('Quick Link Default Hotkey')
-            .setDesc('Hotkey to trigger quick link creation')
-            .addText(text => text
-                .setPlaceholder('l')
-                .setValue(settings.quickLink.defaultHotkey)
-                .onChange(async (value) => {
-                    if (value.trim()) {
-                        settings.quickLink.defaultHotkey = value;
-                        await this.plugin.saveSettings();
-                    }
-                })
-            );
-
-        new Setting(containerEl)
             .setName('Auto Close Quick Link Modal')
             .setDesc('Automatically close quick link modal after opening')
             .addToggle(toggle => toggle

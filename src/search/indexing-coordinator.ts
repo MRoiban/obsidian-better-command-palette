@@ -253,6 +253,49 @@ export class IndexingCoordinator {
     }
 
     /**
+     * Handle file rename atomically to avoid duplicate entries
+     */
+    async renameFile(oldPath: string, newPath: string): Promise<void> {
+        logger.debug(`Enhanced search: Handling file rename from ${oldPath} to ${newPath}`);
+        
+        // Cancel any pending updates for both paths
+        if (this.pendingUpdates.has(oldPath)) {
+            clearTimeout(this.pendingUpdates.get(oldPath)!);
+            this.pendingUpdates.delete(oldPath);
+        }
+        if (this.pendingUpdates.has(newPath)) {
+            clearTimeout(this.pendingUpdates.get(newPath)!);
+            this.pendingUpdates.delete(newPath);
+        }
+
+        try {
+            // First, get the new file to re-index it
+            const newFile = this.getFileByPath?.(newPath);
+            if (!newFile) {
+                logger.warn(`Enhanced search: Could not find renamed file at ${newPath}`);
+                // Just remove the old entry if we can't find the new one
+                await this.removeFile(oldPath);
+                return;
+            }
+
+            // Remove the old entry first
+            await this.contentStore.delete(oldPath);
+            await this.sendWorkerMessage({
+                type: 'REMOVE_FILE',
+                payload: { id: oldPath }
+            });
+
+            // Index the file with its new path
+            await this.indexFile(newFile);
+            
+            logger.debug(`Enhanced search: Successfully renamed file from ${oldPath} to ${newPath}`);
+        } catch (error) {
+            logger.error(`Enhanced search: Failed to rename file from ${oldPath} to ${newPath}:`, error);
+            throw error;
+        }
+    }
+
+    /**
      * Search the index
      */
     async search(query: string, limit = 50): Promise<SearchResult[]> {

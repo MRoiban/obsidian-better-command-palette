@@ -191,6 +191,13 @@ export class SemanticIndexingCoordinator {
     }
 
     /**
+     * Handle file rename operations (alias for handleFileRename for compatibility)
+     */
+    async renameFile(oldPath: string, newPath: string): Promise<void> {
+        await this.handleFileRename(oldPath, newPath);
+    }
+
+    /**
      * Force reindex of a specific file (bypass debouncing)
      */
     async forceReindexFile(file: TFile): Promise<void> {
