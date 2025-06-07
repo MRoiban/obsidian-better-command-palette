@@ -25,6 +25,9 @@ export class QuickLinkModal extends SuggestModal<QuickLinkMatch> {
   private currentResults: QuickLinkMatch[] = [];
   private lastQuery = '';
   private allFiles: QuickLinkMatch[] = [];
+  private isInitialLoad = true; // Track if this is the initial load or user has started typing
+  private hasPerformedInitialSearch = false; // Track if we've done the initial search with selected text
+  private initialSearchResults: QuickLinkMatch[] = []; // Store the initial search results based on selected text
 
   constructor(
     app: App, 
@@ -45,7 +48,7 @@ export class QuickLinkModal extends SuggestModal<QuickLinkMatch> {
     this.modalEl.setAttribute('palette-mode', 'quick-link');
     
     // Set placeholder text
-    this.setPlaceholder(`Search for file to link "${this.truncateText(selectedText, 30)}" to...`);
+    this.setPlaceholder(`Showing results for "${this.truncateText(selectedText, 30)}" (or type to search differently)`);
     
     // Set instructions
     this.setInstructions([
@@ -122,9 +125,25 @@ export class QuickLinkModal extends SuggestModal<QuickLinkMatch> {
   }
 
   getSuggestions(query: string): QuickLinkMatch[] {
-    if (!query || query.length === 0) {
-      // Show recently accessed files when no query
+    // Handle initial load: if no query and we haven't performed the initial search yet,
+    // search using the selected text in the background
+    if (this.isInitialLoad && (!query || query.length === 0) && !this.hasPerformedInitialSearch) {
+      this.hasPerformedInitialSearch = true;
+      // Perform background search using selected text
+      this.performInitialSearch();
+      // Return recent files immediately while search is happening
       return this.getRecentFiles();
+    }
+    
+    // If user has started typing (query exists), switch to user search mode
+    if (query && query.length > 0) {
+      this.isInitialLoad = false;
+    }
+
+    // Handle empty query after initial load - show initial search results based on selected text
+    if (!query || query.length === 0) {
+      // If we have initial search results, show those; otherwise show recent files
+      return this.initialSearchResults.length > 0 ? this.initialSearchResults : this.getRecentFiles();
     }
 
     // If same query and not searching, return cached results
@@ -132,9 +151,78 @@ export class QuickLinkModal extends SuggestModal<QuickLinkMatch> {
       return this.currentResults;
     }
 
-    // Perform search
+    // Perform search with user's query
     this.performSearch(query);
     return this.currentResults;
+  }
+
+  /**
+   * Perform initial search using the selected text as query
+   */
+  private async performInitialSearch(): Promise<void> {
+    if (!this.selectedText || this.selectedText.trim().length === 0) {
+      return;
+    }
+
+    // Use the selected text as the search query for the initial search
+    const searchQuery = this.selectedText.trim();
+    logger.debug('[QuickLink] Performing initial search with selected text:', searchQuery);
+    
+    try {
+      // Try enhanced search first if available
+      if (this.plugin.searchService) {
+        this.isSearching = true;
+        const enhancedResults = await this.plugin.searchService.search(searchQuery, 50);
+        
+        const filteredResults = enhancedResults
+          .filter(result => result.metadata.path !== this.sourceFile.path)
+          .map(result => {
+            const file = this.app.vault.getAbstractFileByPath(result.metadata.path);
+            return {
+              id: result.id,
+              text: file instanceof TFile ? file.basename : result.id,
+              file: file instanceof TFile ? file : null,
+              isUnresolved: false
+            };
+          });
+        
+        // Store the initial search results separately
+        this.initialSearchResults = filteredResults;
+        
+        // Update current results if we're still in initial load mode
+        if (this.isInitialLoad) {
+          this.currentResults = filteredResults;
+        }
+        
+        this.isSearching = false;
+        
+        // Force UI update by triggering input event
+        if (this.inputEl && this.inputEl.value === '') {
+          this.inputEl.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+        return;
+      }
+    } catch (error) {
+      logger.warn('[QuickLink] Enhanced search failed in initial search, falling back to fuzzy search:', error);
+      this.isSearching = false;
+    }
+    
+    // Fallback to fuzzy search
+    const lowerQuery = searchQuery.toLowerCase();
+    const fuzzyResults = this.allFiles
+      .filter(item => {
+        if (item.file?.path === this.sourceFile.path) return false;
+        return item.text.toLowerCase().includes(lowerQuery);
+      })
+      .slice(0, 50);
+    
+    // Store the initial search results separately
+    this.initialSearchResults = fuzzyResults;
+    
+    // Update current results if we're still in initial load mode
+    if (this.isInitialLoad) {
+      this.currentResults = fuzzyResults;
+    }
   }
 
   /**
