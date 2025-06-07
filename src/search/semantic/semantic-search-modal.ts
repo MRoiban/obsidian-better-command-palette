@@ -182,13 +182,10 @@ export class SemanticSearchModal extends SuggestModal<SemanticMatch> {
         this.inputEl.dispatchEvent(new Event('input', { bubbles: true }));
       }
       
-      this.showStatus(`Found ${results.length} results in ${searchTime}ms`, 'success');
-      
     } catch (error) {
       logger.error('[SemanticSearch] Search error:', error);
       new Notice(`Search error: ${error.message}`);
       this.currentResults = [];
-      this.showStatus(`Search failed: ${error.message}`, 'error');
     } finally {
       this.isSearching = false;
     }
