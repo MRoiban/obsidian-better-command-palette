@@ -111,6 +111,7 @@ export interface SearchSettings {
     searchTimeoutMs: number;        // Search timeout (default: 5000ms)
     contentPreviewLength: number;   // Length of content previews (default: 200)
     enableContentSearch: boolean;   // Enable full content search (default: true)
+    preserveQuery: boolean;         // Preserve search query when switching modes (default: false)
     
     // Performance settings
     indexingBatchSize: number;      // Files per batch during indexing (default: 3)

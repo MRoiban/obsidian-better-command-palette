@@ -227,12 +227,23 @@ class BetterCommandPaletteModal extends SuggestModal<Match> implements UnsafeSug
             prefix = this.plugin.settings.fileSearchPrefix;
         } else if (actionType === ActionType.Tags) {
             prefix = this.plugin.settings.tagSearchPrefix;
-
         }
+        
         const currentQuery: string = this.inputEl.value;
-        const cleanQuery = this.currentAdapter.cleanQuery(currentQuery);
-
-        this.inputEl.value = prefix + cleanQuery;
+        
+        // Check if we should preserve the query based on settings
+        const shouldPreserveQuery = this.plugin.settings.enhancedSearch.preserveQuery || 
+                                   this.plugin.settings.semanticSearch.preserveQuery;
+        
+        if (shouldPreserveQuery) {
+            // Only clean the current query to preserve the user's search
+            const cleanQuery = this.currentAdapter.cleanQuery(currentQuery);
+            this.inputEl.value = prefix + cleanQuery;
+        } else {
+            // Original behavior: clear query when switching modes
+            this.inputEl.value = prefix;
+        }
+        
         this.updateSuggestions();
     }
 

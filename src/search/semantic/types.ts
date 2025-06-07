@@ -37,4 +37,5 @@ export interface SemanticSearchSettings {
   maxConcurrentRequests: number;
   cacheEnabled: boolean;
   excludePatterns: string[]; // Array of glob patterns to exclude from indexing
+  preserveQuery: boolean; // Preserve search query when switching modes (default: false)
 }

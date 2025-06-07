@@ -202,6 +202,16 @@ export class SearchSettingsPanel {
                 })
             );
 
+        new Setting(privacyGroup)
+            .setName('Preserve Search Query')
+            .setDesc('Keep the search query when switching between command, file, and tag modes')
+            .addToggle(toggle => toggle
+                .setValue(settings.preserveQuery)
+                .onChange(async (value) => {
+                    await this.updateSearchSettings({ preserveQuery: value });
+                })
+            );
+
         // Add clear usage data button if tracking is enabled
         if (settings.enableUsageTracking) {
             new Setting(privacyGroup)

@@ -76,6 +76,7 @@ export const DEFAULT_SETTINGS: BetterCommandPalettePluginSettings = {
         searchTimeoutMs: 5000,
         contentPreviewLength: 200,
         enableContentSearch: true,
+        preserveQuery: false,            // Preserve search query when switching modes
         // Performance settings for smoother indexing
         indexingBatchSize: 2,            // Small batches for better responsiveness
         indexingDelayMs: 150,            // Longer delay between files
@@ -90,7 +91,8 @@ export const DEFAULT_SETTINGS: BetterCommandPalettePluginSettings = {
         chunkSize: 1000,
         maxConcurrentRequests: 3,
         cacheEnabled: true,
-        excludePatterns: ['**/node_modules/**', '**/.git/**', '**/.*/**', '**/*.excalidraw.md', '**/*.sfile.md'] // Default exclusions
+        excludePatterns: ['**/node_modules/**', '**/.git/**', '**/.*/**', '**/*.excalidraw.md', '**/*.sfile.md'], // Default exclusions
+        preserveQuery: false             // Preserve search query when switching modes
     },
     quickLink: {
         enabled: true,
@@ -582,6 +584,17 @@ export class BetterCommandPaletteSettingTab extends PluginSettingTab {
                 })
             );
 
+        new Setting(perfGroup)
+            .setName('Preserve Search Query')
+            .setDesc('Keep the search query when switching between command, file, and tag modes')
+            .addToggle(toggle => toggle
+                .setValue(settings.semanticSearch.preserveQuery)
+                .onChange(async (value) => {
+                    settings.semanticSearch.preserveQuery = value;
+                    await this.plugin.saveSettings();
+                })
+            );
+
         // Exclusion Patterns
         new Setting(containerEl)
             .setName('Exclude Patterns')
@@ -717,10 +730,15 @@ export class BetterCommandPaletteSettingTab extends PluginSettingTab {
         }
     }
 
-    private async rebuildSemanticIndex(button: HTMLButtonElement): Promise<void> {
-        const originalText = button.textContent;
-        button.textContent = 'Rebuilding...';
-        button.setDisabled(true);
+    private async rebuildSemanticIndex(button: any): Promise<void> {
+        const originalText = button.buttonEl?.textContent || button.textContent;
+        if (button.buttonEl) {
+            button.buttonEl.textContent = 'Rebuilding...';
+            button.setDisabled(true);
+        } else {
+            button.textContent = 'Rebuilding...';
+            button.disabled = true;
+        }
 
         try {
             await this.plugin.reindexSemanticSearch();
@@ -731,8 +749,13 @@ export class BetterCommandPaletteSettingTab extends PluginSettingTab {
             new Notice(errorMsg);
             logger.error('Failed to rebuild semantic search index', error);
         } finally {
-            button.textContent = originalText;
-            button.setDisabled(false);
+            if (button.buttonEl) {
+                button.buttonEl.textContent = originalText;
+                button.setDisabled(false);
+            } else {
+                button.textContent = originalText;
+                button.disabled = false;
+            }
         }
     }
 
