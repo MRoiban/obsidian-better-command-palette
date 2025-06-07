@@ -133,6 +133,14 @@ class BetterCommandPaletteModal extends SuggestModal<Match> implements UnsafeSug
     }
 
     close (evt?: KeyboardEvent) {
+        // Save current query if preserve query is enabled and we're in file search mode
+        if (this.plugin.settings.enhancedSearch.preserveQuery && this.actionType === ActionType.Files) {
+            const currentQuery = this.inputEl.value;
+            // Remove the file search prefix to get just the query part
+            const cleanQuery = this.fileAdapter.cleanQuery(currentQuery);
+            this.plugin.lastFileQuery = cleanQuery;
+        }
+        
         super.close();
 
         if (evt) {
@@ -207,9 +215,17 @@ class BetterCommandPaletteModal extends SuggestModal<Match> implements UnsafeSug
         // result flickering before this is set
         // As far as I can tell onOpen resets the value of the input so this is the first place
         if (this.initialInputValue) {
-            // Instead of just setting the query, we need to:
-            // 1. Set the input value directly
-            this.inputEl.value = this.initialInputValue;
+            // Check if we should restore the last query for file search
+            if (this.plugin.settings.enhancedSearch.preserveQuery && 
+                this.initialInputValue === this.plugin.settings.fileSearchPrefix && 
+                this.plugin.lastFileQuery) {
+                // Restore the last file search query
+                this.inputEl.value = this.initialInputValue + this.plugin.lastFileQuery;
+            } else {
+                // Instead of just setting the query, we need to:
+                // 1. Set the input value directly
+                this.inputEl.value = this.initialInputValue;
+            }
             // 2. Update the action type based on the prefix BEFORE any suggestions are generated
             this.updateActionType();
             // 3. Initialize the adapter if needed before updating suggestions

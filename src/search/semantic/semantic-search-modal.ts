@@ -445,10 +445,23 @@ export class SemanticSearchModal extends SuggestModal<SemanticMatch> {
   onOpen(): void {
     logger.debug('[SemanticSearch] Modal opened');
     super.onOpen();
+    
+    // Restore last query if preserve query is enabled
+    if (this.plugin.settings.semanticSearch.preserveQuery && this.plugin.lastSemanticQuery) {
+      this.inputEl.value = this.plugin.lastSemanticQuery;
+      // Trigger search with the restored query
+      this.inputEl.dispatchEvent(new Event('input', { bubbles: true }));
+    }
   }
 
   onClose(): void {
     logger.debug('[SemanticSearch] Modal closed');
+    
+    // Save current query if preserve query is enabled
+    if (this.plugin.settings.semanticSearch.preserveQuery) {
+      this.plugin.lastSemanticQuery = this.inputEl.value;
+    }
+    
     super.onClose();
     this.currentResults = [];
     this.isSearching = false;

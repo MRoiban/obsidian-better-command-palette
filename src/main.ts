@@ -29,6 +29,10 @@ export default class BetterCommandPalettePlugin extends Plugin {
     embeddingService!: EmbeddingService;
     semanticSearchEngine!: SemanticSearchEngine;
     semanticIndexingCoordinator!: SemanticIndexingCoordinator;
+    
+    // Last queries for preserve query functionality
+    lastSemanticQuery: string = '';
+    lastFileQuery: string = '';
 
     async onload() {
         logger.info('Loading plugin: Better Command Palette');
