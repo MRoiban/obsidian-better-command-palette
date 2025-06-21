@@ -6,7 +6,8 @@ import { TFile, Vault, MetadataCache } from 'obsidian';
 // @ts-ignore
 import { requestUrl } from 'obsidian';
 import { RequestQueue } from './request-queue';
-import { EmbeddingCache, SemanticSearchSettings } from './types';
+import { SemanticSearchSettings } from './types';
+import { MultiFileEmbeddingCache } from './multi-file-embedding-cache';
 import { logger } from '../../utils/logger';
 import { generateContentHashBase36 } from '../../utils/hash';
 
@@ -15,18 +16,18 @@ export class EmbeddingService {
   private metadataCache: MetadataCache;
   private settings: SemanticSearchSettings;
   private requestQueue: RequestQueue;
-  private embeddingCache: Map<string, Float32Array> = new Map();
-  private cacheMetadata: Map<string, any> = new Map();
-  private cacheFile: string;
+  private embeddingCache: MultiFileEmbeddingCache;
+  private legacyCacheFile: string;
 
   constructor(vault: Vault, metadataCache: MetadataCache, settings: SemanticSearchSettings) {
     this.vault = vault;
     this.metadataCache = metadataCache;
     this.settings = settings;
     this.requestQueue = new RequestQueue(settings.maxConcurrentRequests);
-    this.cacheFile = '.obsidian/plugins/obsidian-better-command-palette/embeddings.json';
+    this.embeddingCache = new MultiFileEmbeddingCache(vault);
+    this.legacyCacheFile = '.obsidian/plugins/obsidian-better-command-palette/embeddings.json';
     
-    logger.debug(`Semantic search: EmbeddingService initialized with cache file: ${this.cacheFile}`);
+    logger.debug(`Semantic search: EmbeddingService initialized with multi-file cache`);
     logger.debug(`Semantic search: Cache enabled: ${settings.cacheEnabled}`);
   }
 
@@ -34,68 +35,14 @@ export class EmbeddingService {
     logger.debug('Semantic search: Initializing EmbeddingService...');
     if (this.settings.cacheEnabled) {
       logger.debug('Semantic search: Cache is enabled, attempting to load existing cache...');
-      await this.loadCache();
+      await this.embeddingCache.initialize();
+      
+      // Migrate legacy cache if it exists
+      await this.embeddingCache.migrateLegacyCache(this.legacyCacheFile);
     } else {
       logger.debug('Semantic search: Cache is disabled, skipping cache load');
     }
-    logger.debug(`Semantic search: EmbeddingService initialization complete. ${this.embeddingCache.size} embeddings loaded from cache.`);
-  }
-
-  private async loadCache(): Promise<void> {
-    try {
-      logger.debug(`Semantic search: Attempting to load cache from ${this.cacheFile}`);
-      
-      if (await this.vault.adapter.exists(this.cacheFile)) {
-        logger.debug('Semantic search: Cache file exists, reading...');
-        const cacheData = await this.vault.adapter.read(this.cacheFile);
-        const cache: EmbeddingCache = JSON.parse(cacheData);
-        
-        logger.debug(`Semantic search: Cache loaded with version ${cache.version}, ${Object.keys(cache.embeddings).length} embeddings`);
-      
-        // Validate cache version
-        if (cache.version !== '1.0.0') {
-          logger.debug('Semantic search: Cache version mismatch, rebuilding...');
-          return;
-        }
-
-        let loadedCount = 0;
-        let skippedCount = 0;
-        for (const [path, data] of Object.entries(cache.embeddings)) {
-          const file = this.vault.getAbstractFileByPath(path) as TFile;
-        
-          if (!file) {
-            logger.debug(`Semantic search: File ${path} no longer exists, skipping cache entry`);
-            skippedCount++;
-            continue;
-          }
-          
-          if (this.isFileUpToDate(file, data)) {
-            // Convert regular array back to Float32Array for memory efficiency
-            this.embeddingCache.set(path, new Float32Array(data.embedding));
-            this.cacheMetadata.set(path, {
-              lastModified: data.lastModified,
-              contentHash: data.contentHash,
-              chunks: data.chunks
-            });
-            loadedCount++;
-            logger.debug(`Semantic search: Loaded cached embedding for ${path} (modified: ${new Date(data.lastModified).toISOString()})`);
-          } else {
-            logger.debug(`Semantic search: File ${path} is newer than cache (file: ${new Date(file.stat.mtime).toISOString()}, cache: ${new Date(data.lastModified).toISOString()}), skipping`);
-            skippedCount++;
-          }
-        }
-      
-        logger.debug(`Semantic search: Loaded ${loadedCount} embeddings from cache, skipped ${skippedCount}`);
-      } else {
-        logger.debug('Semantic search: Cache file does not exist, starting fresh');
-      }
-    } catch (error) {
-      logger.error('Semantic search: Error loading embedding cache:', error);
-    }
-  }
-
-  private isFileUpToDate(file: TFile, cacheData: any): boolean {
-    return file.stat.mtime <= cacheData.lastModified;
+    logger.debug(`Semantic search: EmbeddingService initialization complete. ${this.embeddingCache.size()} embeddings loaded from cache.`);
   }
 
   async saveCache(): Promise<void> {
@@ -105,60 +52,12 @@ export class EmbeddingService {
     }
 
     try {
-      logger.debug(`Semantic search: Starting cache save with ${this.embeddingCache.size} embeddings in memory`);
-      logger.debug(`Semantic search: Saving cache to: ${this.cacheFile}`);
-      
-      const cache: EmbeddingCache = {
-        version: '1.0.0',
-        lastUpdated: Date.now(),
-        embeddings: {}
-      };
-
-      let savedCount = 0;
-      let skippedCount = 0;
-      
-      for (const [path, embedding] of this.embeddingCache) {
-        const file = this.vault.getAbstractFileByPath(path) as TFile;
-        const metadata = this.cacheMetadata.get(path);
-        
-        if (!file) {
-          logger.debug(`Semantic search: File ${path} no longer exists, skipping cache save`);
-          skippedCount++;
-          continue;
-        }
-        
-        if (!metadata) {
-          logger.debug(`Semantic search: No metadata for ${path}, skipping cache save`);
-          skippedCount++;
-          continue;
-        }
-      
-        cache.embeddings[path] = {
-          embedding: Array.from(embedding), // Convert Float32Array to regular array for JSON
-          lastModified: metadata.lastModified,
-          contentHash: metadata.contentHash,
-          chunks: metadata.chunks
-        };
-        savedCount++;
-        logger.debug(`Semantic search: Prepared ${path} for cache save (${embedding.length} dimensions, ${metadata.chunks} chunks)`);
-      }
-
-      logger.debug(`Semantic search: Writing cache file with ${savedCount} embeddings (${skippedCount} skipped) to ${this.cacheFile}`);
-      
-      await this.vault.adapter.write(this.cacheFile, JSON.stringify(cache));
-      logger.debug(`Semantic search: Successfully saved ${savedCount} embeddings to cache file`);
-      
-      // Verify the file was created
-      const exists = await this.vault.adapter.exists(this.cacheFile);
-      logger.debug(`Semantic search: Cache file exists after write: ${exists}`);
-      if (exists) {
-        const stat = await this.vault.adapter.stat(this.cacheFile);
-        logger.debug(`Semantic search: Cache file size: ${stat?.size} bytes`);
-      }
+      logger.debug(`Semantic search: Starting cache save with ${this.embeddingCache.size()} embeddings in memory`);
+      await this.embeddingCache.saveCache();
+      logger.debug(`Semantic search: Successfully saved ${this.embeddingCache.size()} embeddings to multi-file cache`);
     } catch (error) {
       logger.error('Semantic search: Error saving embedding cache:', error);
-      logger.error('Semantic search: Cache file path:', this.cacheFile);
-      logger.error('Semantic search: Error details:', error);
+      throw error;
     }
   }
 
@@ -406,8 +305,8 @@ export class EmbeddingService {
       logger.debug(`Semantic search: Starting indexing of ${file.path}...`);
       
       // Check if file is already up-to-date
-      const existingMetadata = this.cacheMetadata.get(file.path);
-      if (existingMetadata && this.isFileUpToDate(file, existingMetadata)) {
+      const existingMetadata = this.embeddingCache.getMetadata(file.path);
+      if (existingMetadata && this.embeddingCache.isFileUpToDate(file, existingMetadata)) {
         logger.debug(`Semantic search: File ${file.path} is already up-to-date in cache`);
         return;
       }
@@ -419,7 +318,7 @@ export class EmbeddingService {
       // Check if content actually changed
       if (existingMetadata && existingMetadata.contentHash === contentHash) {
         logger.debug(`Semantic search: Content unchanged for ${file.path}, updating metadata only`);
-        this.cacheMetadata.set(file.path, {
+        this.embeddingCache.setEmbedding(file.path, this.embeddingCache.getEmbedding(file.path)!, {
           ...existingMetadata,
           lastModified: file.stat.mtime
         });
@@ -484,8 +383,7 @@ export class EmbeddingService {
       }
 
       // Store in cache
-      this.embeddingCache.set(file.path, finalEmbedding);
-      this.cacheMetadata.set(file.path, {
+      this.embeddingCache.setEmbedding(file.path, finalEmbedding, {
         lastModified: file.stat.mtime,
         contentHash,
         chunks: chunks.length
@@ -552,8 +450,8 @@ export class EmbeddingService {
         return false;
       }
       
-      const cached = this.cacheMetadata.get(file.path);
-      const needsReindex = !cached || !this.isFileUpToDate(file, cached);
+      const cached = this.embeddingCache.getMetadata(file.path);
+      const needsReindex = !cached || !this.embeddingCache.isFileUpToDate(file, cached);
       
       if (needsReindex) {
         logger.debug(`Semantic search: File ${file.path} needs indexing (${cached ? 'modified since cache' : 'not in cache'})`);
@@ -564,8 +462,8 @@ export class EmbeddingService {
       return needsReindex;
     });
 
-    const excludedCount = markdownFiles.length - filesToIndex.length - this.embeddingCache.size;
-    logger.debug(`Semantic search: Found ${filesToIndex.length} files to index (${this.embeddingCache.size} already cached, ${excludedCount} excluded)`);
+    const excludedCount = markdownFiles.length - filesToIndex.length - this.embeddingCache.size();
+    logger.debug(`Semantic search: Found ${filesToIndex.length} files to index (${this.embeddingCache.size()} already cached, ${excludedCount} excluded)`);
 
     if (filesToIndex.length === 0) {
       logger.debug('Semantic search: All files are already indexed and up-to-date');
@@ -626,7 +524,7 @@ export class EmbeddingService {
     }
 
     // Final cache save (in case the last batch didn't trigger a save)
-    logger.debug(`Semantic search: Final cache save with ${this.embeddingCache.size} embeddings...`);
+    logger.debug(`Semantic search: Final cache save with ${this.embeddingCache.size()} embeddings...`);
     await this.saveCache();
     
     const totalTime = ((Date.now() - startTime) / 1000).toFixed(1);
@@ -675,11 +573,11 @@ export class EmbeddingService {
   }
 
   getEmbedding(filePath: string): Float32Array | undefined {
-    return this.embeddingCache.get(filePath);
+    return this.embeddingCache.getEmbedding(filePath);
   }
 
   getIndexedFileCount(): number {
-    return this.embeddingCache.size;
+    return this.embeddingCache.size();
   }
 
   getQueueStatus(): { queued: number; active: number } {
@@ -690,13 +588,11 @@ export class EmbeddingService {
   }
 
   clearCache(): void {
-    this.embeddingCache.clear();
-    this.cacheMetadata.clear();
+    this.embeddingCache.clearAll();
   }
 
   removeFromCache(filePath: string): void {
-    this.embeddingCache.delete(filePath);
-    this.cacheMetadata.delete(filePath);
+    this.embeddingCache.removeEmbedding(filePath);
   }
 
   /**

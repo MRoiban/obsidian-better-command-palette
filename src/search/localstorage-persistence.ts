@@ -1,15 +1,32 @@
 import { ContentStore } from './interfaces';
+import { MultiFileContentCache } from './multi-file-content-cache';
 import { logger } from '../utils/logger';
 
 /**
- * localStorage-based persistence with compression.
+ * Multi-file localStorage-based persistence without compression.
  * Fallback for environments where IndexedDB is blocked but localStorage is available.
- * Uses compression to fit within typical 5-10MB localStorage limits.
+ * Uses multi-file approach to handle large datasets efficiently.
  */
 export class LocalStoragePersistence implements ContentStore {
     private keyPrefix = 'bcp-enhanced-search';
-    private maxStorageSize = 5 * 1024 * 1024; // 5MB conservative limit
+    private contentCache: MultiFileContentCache;
     private isInitialized = false;
+
+    constructor(vault?: any) {
+        // For localStorage mode, we simulate the vault interface
+        const mockVault = vault || {
+            adapter: {
+                exists: (path: string) => Promise.resolve(false),
+                read: (path: string) => Promise.resolve('{}'),
+                write: (path: string, data: string) => Promise.resolve(),
+                remove: (path: string) => Promise.resolve(),
+                mkdir: (path: string) => Promise.resolve(),
+                list: (path: string) => Promise.resolve({ files: [], folders: [] })
+            }
+        };
+        
+        this.contentCache = new MultiFileContentCache(mockVault, `${this.keyPrefix}/cache`);
+    }
 
     async initialize(): Promise<void> {
         if (this.isInitialized) {
@@ -27,8 +44,14 @@ export class LocalStoragePersistence implements ContentStore {
             localStorage.setItem(testKey, 'test');
             localStorage.removeItem(testKey);
             
+            // Initialize the multi-file cache
+            await this.contentCache.initialize();
+            
+            // Migrate legacy data if it exists
+            await this.contentCache.migrateLegacyData(`${this.keyPrefix}-content-`);
+            
             this.isInitialized = true;
-            logger.info('Enhanced search: localStorage persistence initialized');
+            logger.info('Enhanced search: Multi-file localStorage persistence initialized');
         } catch (error) {
             logger.error('Enhanced search: localStorage access failed:', error);
             throw error;
@@ -38,11 +61,7 @@ export class LocalStoragePersistence implements ContentStore {
     async get(fileId: string): Promise<string> {
         this.ensureInitialized();
         try {
-            const key = `${this.keyPrefix}-content-${fileId}`;
-            const compressed = localStorage.getItem(key);
-            if (!compressed) return '';
-            
-            return this.decompress(compressed);
+            return await this.contentCache.get(fileId);
         } catch (error) {
             logger.warn(`Failed to get content for ${fileId}:`, error);
             return '';
@@ -52,94 +71,50 @@ export class LocalStoragePersistence implements ContentStore {
     async set(fileId: string, content: string): Promise<void> {
         this.ensureInitialized();
         try {
-            const key = `${this.keyPrefix}-content-${fileId}`;
-            const compressed = this.compress(content);
+            await this.contentCache.set(fileId, content);
             
-            // Check if we're approaching storage limits
-            if (this.getStorageUsage() + compressed.length > this.maxStorageSize) {
-                logger.warn('localStorage approaching limits, clearing old data');
-                await this.clearOldData();
+            // Periodically save the cache
+            if (Math.random() < 0.1) { // 10% chance to save on each set
+                await this.contentCache.saveCache();
             }
-            
-            localStorage.setItem(key, compressed);
         } catch (error) {
-            if (error.name === 'QuotaExceededError') {
-                logger.warn('localStorage quota exceeded, clearing old data and retrying');
-                await this.clearOldData();
-                try {
-                    localStorage.setItem(`${this.keyPrefix}-content-${fileId}`, this.compress(content));
-                } catch (retryError) {
-                    logger.error('Failed to store content even after clearing:', retryError);
-                }
-            } else {
-                logger.error(`Failed to store content for ${fileId}:`, error);
-            }
+            logger.error(`Failed to store content for ${fileId}:`, error);
         }
     }
 
     async delete(fileId: string): Promise<void> {
         this.ensureInitialized();
-        const keys = [
-            `${this.keyPrefix}-content-${fileId}`,
-            `${this.keyPrefix}-metadata-${fileId}`,
-            `${this.keyPrefix}-usage-${fileId}`
-        ];
-        
-        keys.forEach(key => {
-            try {
-                localStorage.removeItem(key);
-            } catch (error) {
-                logger.warn(`Failed to remove ${key}:`, error);
-            }
-        });
+        try {
+            await this.contentCache.delete(fileId);
+        } catch (error) {
+            logger.warn(`Failed to delete ${fileId}:`, error);
+        }
     }
 
     async clear(): Promise<void> {
         this.ensureInitialized();
-        const keysToRemove: string[] = [];
-        
-        for (let i = 0; i < localStorage.length; i++) {
-            const key = localStorage.key(i);
-            if (key && key.startsWith(this.keyPrefix)) {
-                keysToRemove.push(key);
-            }
+        try {
+            await this.contentCache.clear();
+        } catch (error) {
+            logger.warn('Failed to clear cache:', error);
         }
-        
-        keysToRemove.forEach(key => {
-            try {
-                localStorage.removeItem(key);
-            } catch (error) {
-                logger.warn(`Failed to remove ${key}:`, error);
-            }
-        });
     }
 
     async getStats(): Promise<{ count: number; size: number }> {
         this.ensureInitialized();
-        let count = 0;
-        let size = 0;
-        
-        for (let i = 0; i < localStorage.length; i++) {
-            const key = localStorage.key(i);
-            if (key && key.startsWith(`${this.keyPrefix}-content-`)) {
-                count++;
-                const value = localStorage.getItem(key);
-                if (value) {
-                    size += value.length;
-                }
-            }
+        try {
+            return await this.contentCache.getStats();
+        } catch (error) {
+            logger.warn('Failed to get stats:', error);
+            return { count: 0, size: 0 };
         }
-        
-        return { count, size };
     }
 
     // Metadata methods
     async setMetadata(fileId: string, metadata: any): Promise<void> {
         this.ensureInitialized();
         try {
-            const key = `${this.keyPrefix}-metadata-${fileId}`;
-            const compressed = this.compress(JSON.stringify(metadata));
-            localStorage.setItem(key, compressed);
+            await this.contentCache.setMetadata(fileId, metadata);
         } catch (error) {
             logger.warn(`Failed to store metadata for ${fileId}:`, error);
         }
@@ -148,11 +123,7 @@ export class LocalStoragePersistence implements ContentStore {
     async getMetadata(fileId: string): Promise<any> {
         this.ensureInitialized();
         try {
-            const key = `${this.keyPrefix}-metadata-${fileId}`;
-            const compressed = localStorage.getItem(key);
-            if (!compressed) return null;
-            
-            return JSON.parse(this.decompress(compressed));
+            return await this.contentCache.getMetadata(fileId);
         } catch (error) {
             logger.warn(`Failed to get metadata for ${fileId}:`, error);
             return null;
@@ -163,9 +134,7 @@ export class LocalStoragePersistence implements ContentStore {
     async setUsageStats(fileId: string, stats: any): Promise<void> {
         this.ensureInitialized();
         try {
-            const key = `${this.keyPrefix}-usage-${fileId}`;
-            const compressed = this.compress(JSON.stringify(stats));
-            localStorage.setItem(key, compressed);
+            await this.contentCache.setUsageStats(fileId, stats);
         } catch (error) {
             logger.warn(`Failed to store usage stats for ${fileId}:`, error);
         }
@@ -174,11 +143,7 @@ export class LocalStoragePersistence implements ContentStore {
     async getUsageStats(fileId: string): Promise<any> {
         this.ensureInitialized();
         try {
-            const key = `${this.keyPrefix}-usage-${fileId}`;
-            const compressed = localStorage.getItem(key);
-            if (!compressed) return null;
-            
-            return JSON.parse(this.decompress(compressed));
+            return await this.contentCache.getUsageStats(fileId);
         } catch (error) {
             logger.warn(`Failed to get usage stats for ${fileId}:`, error);
             return null;
@@ -187,31 +152,19 @@ export class LocalStoragePersistence implements ContentStore {
 
     async getAllUsageStats(): Promise<Record<string, any>> {
         this.ensureInitialized();
-        const stats: Record<string, any> = {};
-        
-        for (let i = 0; i < localStorage.length; i++) {
-            const key = localStorage.key(i);
-            if (key && key.startsWith(`${this.keyPrefix}-usage-`)) {
-                const fileId = key.replace(`${this.keyPrefix}-usage-`, '');
-                const usageStats = await this.getUsageStats(fileId);
-                if (usageStats) {
-                    stats[fileId] = usageStats;
-                }
-            }
+        try {
+            return await this.contentCache.getAllUsageStats();
+        } catch (error) {
+            logger.warn('Failed to get all usage stats:', error);
+            return {};
         }
-        
-        return stats;
     }
 
     // Search index serialization
     async loadSearchIndex(): Promise<any> {
         this.ensureInitialized();
         try {
-            const key = `${this.keyPrefix}-search-index`;
-            const compressed = localStorage.getItem(key);
-            if (!compressed) return null;
-            
-            return JSON.parse(this.decompress(compressed));
+            return await this.contentCache.loadSearchIndex();
         } catch (error) {
             logger.warn('Failed to load search index:', error);
             return null;
@@ -221,91 +174,25 @@ export class LocalStoragePersistence implements ContentStore {
     async saveSearchIndex(indexData: any): Promise<void> {
         this.ensureInitialized();
         try {
-            const key = `${this.keyPrefix}-search-index`;
-            const compressed = this.compress(JSON.stringify(indexData));
-            localStorage.setItem(key, compressed);
+            await this.contentCache.saveSearchIndex(indexData);
         } catch (error) {
             logger.warn('Failed to save search index:', error);
         }
     }
 
     close(): void {
-        // No cleanup needed for localStorage
+        // Save cache before closing
+        if (this.isInitialized) {
+            this.contentCache.saveCache().catch(error => {
+                logger.warn('Failed to save cache on close:', error);
+            });
+        }
+        this.contentCache.close();
     }
 
     private ensureInitialized(): void {
         if (!this.isInitialized) {
             throw new Error('LocalStoragePersistence not initialized. Call initialize() first.');
         }
-    }
-
-    /**
-     * Simple compression using built-in compression or base64 encoding
-     */
-    private compress(text: string): string {
-        try {
-            // Use LZ-string if available, otherwise just return the text
-            // In a real implementation, you might want to include a compression library
-            return btoa(unescape(encodeURIComponent(text)));
-        } catch (error) {
-            logger.warn('Compression failed, storing uncompressed:', error);
-            return text;
-        }
-    }
-
-    /**
-     * Decompress text
-     */
-    private decompress(compressed: string): string {
-        try {
-            return decodeURIComponent(escape(atob(compressed)));
-        } catch (error) {
-            // Assume it's uncompressed text
-            return compressed;
-        }
-    }
-
-    /**
-     * Get current localStorage usage for this plugin
-     */
-    private getStorageUsage(): number {
-        let usage = 0;
-        for (let i = 0; i < localStorage.length; i++) {
-            const key = localStorage.key(i);
-            if (key && key.startsWith(this.keyPrefix)) {
-                const value = localStorage.getItem(key);
-                if (value) {
-                    usage += key.length + value.length;
-                }
-            }
-        }
-        return usage;
-    }
-
-    /**
-     * Clear old data to make room for new data
-     */
-    private async clearOldData(): Promise<void> {
-        // Simple strategy: remove oldest content entries
-        const contentKeys: string[] = [];
-        
-        for (let i = 0; i < localStorage.length; i++) {
-            const key = localStorage.key(i);
-            if (key && key.startsWith(`${this.keyPrefix}-content-`)) {
-                contentKeys.push(key);
-            }
-        }
-        
-        // Remove half of the content entries
-        const keysToRemove = contentKeys.slice(0, Math.floor(contentKeys.length / 2));
-        keysToRemove.forEach(key => {
-            try {
-                localStorage.removeItem(key);
-            } catch (error) {
-                logger.warn(`Failed to remove old data ${key}:`, error);
-            }
-        });
-        
-        logger.info(`Cleared ${keysToRemove.length} old entries to make room`);
     }
 } 
