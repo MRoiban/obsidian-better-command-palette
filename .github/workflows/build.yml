@@ -43,23 +43,39 @@ jobs:
       - name: Update version files
         if: github.event_name == 'workflow_dispatch'
         run: |
-          # Update package.json version
-          npm version ${{ steps.version.outputs.VERSION }} --no-git-tag-version
-          
-          # Update manifest.json version
-          if [ -f manifest.json ]; then
-            sed -i 's/"version": "[^"]*"/"version": "${{ steps.version.outputs.VERSION }}"/' manifest.json
+          CURRENT_VERSION=$(node -p "require('./package.json').version")
+          echo "Current version in package.json is $CURRENT_VERSION"
+          echo "Requested version is ${{ steps.version.outputs.VERSION }}"
+
+          if [ "$CURRENT_VERSION" != "${{ steps.version.outputs.VERSION }}" ]; then
+            echo "Updating package.json version…"
+            npm version ${{ steps.version.outputs.VERSION }} --no-git-tag-version
+          else
+            echo "package.json already at requested version; skipping npm version"
           fi
           
-          # Update versions.json
+          # Update manifest.json version if it differs
+          if [ -f manifest.json ]; then
+            MANIFEST_VERSION=$(jq -r '.version' manifest.json)
+            if [ "$MANIFEST_VERSION" != "${{ steps.version.outputs.VERSION }}" ]; then
+              echo "Updating manifest.json version…"
+              jq --arg ver "${{ steps.version.outputs.VERSION }}" '.version=$ver' manifest.json > manifest.json.tmp && mv manifest.json.tmp manifest.json
+            else
+              echo "manifest.json already at requested version; skipping"
+            fi
+          fi
+          
+          # Update versions.json (append mapping only if absent)
           if [ -f versions.json ]; then
-            # Use the version-bump script if it exists
             if [ -f version-bump.mjs ]; then
               node version-bump.mjs ${{ steps.version.outputs.VERSION }}
             else
-              # Fallback: manually update versions.json
-              jq '. + {"${{ steps.version.outputs.VERSION }}": "0.12.0"}' versions.json > versions.json.tmp
-              mv versions.json.tmp versions.json
+              if ! jq -e --arg ver "${{ steps.version.outputs.VERSION }}" 'has($ver)' versions.json >/dev/null; then
+                echo "Adding version to versions.json"
+                jq --arg ver "${{ steps.version.outputs.VERSION }}" '. + {($ver): "0.12.0"}' versions.json > versions.json.tmp && mv versions.json.tmp versions.json
+              else
+                echo "versions.json already contains requested version; skipping"
+              fi
             fi
           fi
 
