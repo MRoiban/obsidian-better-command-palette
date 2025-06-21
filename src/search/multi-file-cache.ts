@@ -17,7 +17,7 @@ export abstract class MultiFileCache<T> {
         vault: Vault,
         cacheDirectory: string,
         cacheBaseName: string,
-        maxFileSize: number = 4 * 1024 * 1024 // 4MB default
+        maxFileSize: number = 3 * 1024 * 1024 // 3MB default
     ) {
         this.vault = vault;
         this.cacheDirectory = cacheDirectory;
@@ -139,31 +139,58 @@ export abstract class MultiFileCache<T> {
      * Group cache entries into files based on size limits
      */
     private async groupEntriesIntoFiles(): Promise<any[]> {
-        const files: any[] = [];
-        let currentFile = this.createEmptyFileStructure();
-        let currentSize = JSON.stringify(currentFile).length;
+        try {
+            const files: any[] = [];
+            let currentFile = this.createEmptyFileStructure();
+            
+            if (!currentFile) {
+                logger.error('Multi-file cache: createEmptyFileStructure returned null/undefined');
+                throw new Error('Failed to create empty file structure');
+            }
+            
+            let currentSize = JSON.stringify(currentFile).length;
 
-        for (const [key, value] of this.cache) {
-            const entry = this.serializeEntry(key, value);
-            const entrySize = JSON.stringify(entry).length;
+            for (const [key, value] of this.cache) {
+                if (!key || value === undefined || value === null) {
+                    logger.warn(`Multi-file cache: Skipping invalid entry - key: ${key}, value: ${value}`);
+                    continue;
+                }
 
-            // If adding this entry would exceed the size limit, start a new file
-            if (currentSize + entrySize > this.maxFileSize && this.getFileEntryCount(currentFile) > 0) {
-                files.push(currentFile);
-                currentFile = this.createEmptyFileStructure();
-                currentSize = JSON.stringify(currentFile).length;
+                const entry = this.serializeEntry(key, value);
+                if (!entry) {
+                    logger.warn(`Multi-file cache: serializeEntry returned null/undefined for key: ${key}`);
+                    continue;
+                }
+                
+                const entrySize = JSON.stringify(entry).length;
+
+                // If adding this entry would exceed the size limit, start a new file
+                if (currentSize + entrySize > this.maxFileSize && this.getFileEntryCount(currentFile) > 0) {
+                    files.push(currentFile);
+                    currentFile = this.createEmptyFileStructure();
+                    
+                    if (!currentFile) {
+                        logger.error('Multi-file cache: createEmptyFileStructure returned null/undefined on new file creation');
+                        throw new Error('Failed to create empty file structure');
+                    }
+                    
+                    currentSize = JSON.stringify(currentFile).length;
+                }
+
+                this.addEntryToFile(currentFile, key, entry);
+                currentSize += entrySize;
             }
 
-            this.addEntryToFile(currentFile, key, entry);
-            currentSize += entrySize;
-        }
+            // Add the last file if it has entries
+            if (this.getFileEntryCount(currentFile) > 0) {
+                files.push(currentFile);
+            }
 
-        // Add the last file if it has entries
-        if (this.getFileEntryCount(currentFile) > 0) {
-            files.push(currentFile);
+            return files;
+        } catch (error) {
+            logger.error('Multi-file cache: Error in groupEntriesIntoFiles:', error);
+            throw error;
         }
-
-        return files;
     }
 
     /**
