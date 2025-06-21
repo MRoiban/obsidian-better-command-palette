@@ -8,6 +8,7 @@ import { ContentSearchScorer } from './scorer';
 import { performanceMonitor } from './performance-monitor';
 import { logger } from '../utils/logger';
 import { generateContentHashBase36 } from '../utils/hash';
+import { InMemoryPersistence } from './in-memory-persistence';
 
 /**
  * Main search service that coordinates all enhanced search components
@@ -55,9 +56,27 @@ export class EnhancedSearchService {
         logger.debug('Enhanced search: Starting initialization...');
 
         try {
-            // Initialize persistence layer
-            await this.persistence.initialize();
-            logger.debug('Enhanced search: Persistence initialized');
+            // Initialize persistence layer with graceful fallback for environments without IndexedDB (e.g. Obsidian mobile)
+            try {
+                await this.persistence.initialize();
+                logger.debug('Enhanced search: Persistence initialized');
+            } catch (error) {
+                logger.warn('Enhanced search: IndexedDB not available – falling back to in-memory persistence (data will not persist across sessions).', error);
+
+                // Switch to the in-memory persistence implementation
+                this.persistence = new InMemoryPersistence();
+                await this.persistence.initialize();
+
+                // Re-create the indexing coordinator so it uses the new persistence instance
+                this.indexingCoordinator = new IndexingCoordinator(
+                    this.app,
+                    this.searchIndex,
+                    this.persistence,
+                    this.usageTracker,
+                    this.persistence,
+                    debounce(this.performFileIndexing.bind(this), this.settings.indexingDebounceMs)
+                );
+            }
 
             // Initialize indexing coordinator
             await this.indexingCoordinator.initialize();
