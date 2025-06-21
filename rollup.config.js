@@ -6,6 +6,7 @@ import { terser } from 'rollup-plugin-terser';
 import copy from 'rollup-plugin-copy';
 import eslint from '@rollup/plugin-eslint';
 import scss from 'rollup-plugin-scss';
+import replace from '@rollup/plugin-replace';
 
 const isProduction = process.env.NODE_ENV === 'production';
 const isLocal = process.env.DEST === 'local';
@@ -31,6 +32,10 @@ export default {
     },
     external: ['obsidian'],
     plugins: [
+        replace({
+            'process.env.NODE_ENV': JSON.stringify(isProduction ? 'production' : 'development'),
+            preventAssignment: true,
+        }),
         nodeResolve({
             browser: true,
             extensions: ['.ts', '.js', '.d.ts'],
