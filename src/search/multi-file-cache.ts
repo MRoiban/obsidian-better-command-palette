@@ -148,7 +148,7 @@ export abstract class MultiFileCache<T> {
             const entrySize = JSON.stringify(entry).length;
 
             // If adding this entry would exceed the size limit, start a new file
-            if (currentSize + entrySize > this.maxFileSize && Object.keys(currentFile.entries).length > 0) {
+            if (currentSize + entrySize > this.maxFileSize && this.getFileEntryCount(currentFile) > 0) {
                 files.push(currentFile);
                 currentFile = this.createEmptyFileStructure();
                 currentSize = JSON.stringify(currentFile).length;
@@ -159,7 +159,7 @@ export abstract class MultiFileCache<T> {
         }
 
         // Add the last file if it has entries
-        if (Object.keys(currentFile.entries).length > 0) {
+        if (this.getFileEntryCount(currentFile) > 0) {
             files.push(currentFile);
         }
 
@@ -235,4 +235,5 @@ export abstract class MultiFileCache<T> {
     protected abstract createEmptyFileStructure(): any;
     protected abstract serializeEntry(key: string, value: T): any;
     protected abstract addEntryToFile(file: any, key: string, entry: any): void;
+    protected abstract getFileEntryCount(file: any): number;
 } 

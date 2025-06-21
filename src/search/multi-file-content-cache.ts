@@ -160,6 +160,10 @@ export class MultiFileContentCache extends MultiFileCache<{
         file.entries[key] = entry;
     }
 
+    protected getFileEntryCount(file: any): number {
+        return Object.keys(file.entries || {}).length;
+    }
+
     /**
      * Legacy compatibility method for migrating from localStorage
      */

@@ -162,6 +162,10 @@ export class MultiFileEmbeddingCache extends MultiFileCache<{
         file.embeddings[key] = entry;
     }
 
+    protected getFileEntryCount(file: any): number {
+        return Object.keys(file.embeddings || {}).length;
+    }
+
     /**
      * Legacy compatibility method for migrating from single-file cache
      */
