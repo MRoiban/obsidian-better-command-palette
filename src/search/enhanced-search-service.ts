@@ -3,12 +3,14 @@ import { SearchSettings, EnhancedSearchResult, FileMetadata } from './interfaces
 import { MiniSearchAdapter } from './mini-search-adapter';
 import { IndexingCoordinator } from './indexing-coordinator';
 import { IndexPersistence } from './persistence';
+import { ObsidianPersistence } from './obsidian-persistence';
+import { LocalStoragePersistence } from './localstorage-persistence';
+import { InMemoryPersistence } from './in-memory-persistence';
 import { FileUsageTracker } from './usage-tracker';
 import { ContentSearchScorer } from './scorer';
 import { performanceMonitor } from './performance-monitor';
 import { logger } from '../utils/logger';
 import { generateContentHashBase36 } from '../utils/hash';
-import { InMemoryPersistence } from './in-memory-persistence';
 
 /**
  * Main search service that coordinates all enhanced search components
@@ -18,19 +20,21 @@ export class EnhancedSearchService {
     private settings: SearchSettings;
     private searchIndex: MiniSearchAdapter;
     private indexingCoordinator: IndexingCoordinator;
-    private persistence: IndexPersistence;
+    private persistence: IndexPersistence | ObsidianPersistence | LocalStoragePersistence | InMemoryPersistence;
     private usageTracker: FileUsageTracker;
     private scorer: ContentSearchScorer;
     private isInitialized = false;
     private indexingPaused = false;
     private debouncedCacheSave: () => void;
     private isIndexing = false;
+    private plugin: any; // Plugin instance for Obsidian persistence
 
-    constructor(app: App, settings: SearchSettings) {
+    constructor(app: App, settings: SearchSettings, plugin?: any) {
         this.app = app;
         this.settings = settings;
+        this.plugin = plugin;
         this.searchIndex = new MiniSearchAdapter();
-        this.persistence = new IndexPersistence();
+        this.persistence = new IndexPersistence(); // Will be replaced with better option during initialization
         this.usageTracker = new FileUsageTracker();
         this.scorer = new ContentSearchScorer(settings);
         
@@ -48,26 +52,44 @@ export class EnhancedSearchService {
     }
 
     /**
-     * Initialize the search service
+     * Initialize persistence with fallback chain: Obsidian → IndexedDB → localStorage → in-memory
      */
-    async initialize(): Promise<void> {
-        if (this.isInitialized) return;
+    private async initializePersistence(): Promise<void> {
+        const persistenceOptions = [
+            {
+                name: 'Obsidian Plugin Storage',
+                create: () => this.plugin ? new ObsidianPersistence(this.plugin) : null,
+                description: 'Uses Obsidian\'s native plugin storage (works on all platforms)'
+            },
+            {
+                name: 'IndexedDB',
+                create: () => new IndexPersistence(),
+                description: 'Browser IndexedDB storage (desktop only)'
+            },
+            {
+                name: 'localStorage',
+                create: () => new LocalStoragePersistence(),
+                description: 'Browser localStorage with compression (mobile fallback)'
+            },
+            {
+                name: 'In-Memory',
+                create: () => new InMemoryPersistence(),
+                description: 'Temporary storage (no persistence across sessions)'
+            }
+        ];
 
-        logger.debug('Enhanced search: Starting initialization...');
+        let lastError: Error | null = null;
 
-        try {
-            // Initialize persistence layer with graceful fallback for environments without IndexedDB (e.g. Obsidian mobile)
+        for (const option of persistenceOptions) {
             try {
-                await this.persistence.initialize();
-                logger.debug('Enhanced search: Persistence initialized');
-            } catch (error) {
-                logger.warn('Enhanced search: IndexedDB not available – falling back to in-memory persistence (data will not persist across sessions).', error);
+                const persistence = option.create();
+                if (!persistence) continue; // Skip if creation failed (e.g., no plugin instance)
 
-                // Switch to the in-memory persistence implementation
-                this.persistence = new InMemoryPersistence();
-                await this.persistence.initialize();
-
-                // Re-create the indexing coordinator so it uses the new persistence instance
+                await persistence.initialize();
+                this.persistence = persistence;
+                logger.info(`Enhanced search: Using ${option.name} for persistence - ${option.description}`);
+                
+                // Re-create the indexing coordinator with the new persistence instance
                 this.indexingCoordinator = new IndexingCoordinator(
                     this.app,
                     this.searchIndex,
@@ -76,7 +98,30 @@ export class EnhancedSearchService {
                     this.persistence,
                     debounce(this.performFileIndexing.bind(this), this.settings.indexingDebounceMs)
                 );
+                
+                return; // Success!
+            } catch (error) {
+                lastError = error as Error;
+                logger.warn(`Enhanced search: ${option.name} not available:`, error);
+                continue; // Try next option
             }
+        }
+
+        // If we get here, all options failed
+        throw new Error(`Enhanced search: All persistence options failed. Last error: ${lastError?.message}`);
+    }
+
+    /**
+     * Initialize the search service
+     */
+    async initialize(): Promise<void> {
+        if (this.isInitialized) return;
+
+        logger.debug('Enhanced search: Starting initialization...');
+
+        try {
+            // Initialize persistence layer with comprehensive fallback chain
+            await this.initializePersistence();
 
             // Initialize indexing coordinator
             await this.indexingCoordinator.initialize();

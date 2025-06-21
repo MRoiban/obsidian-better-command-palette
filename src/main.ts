@@ -43,8 +43,8 @@ export default class BetterCommandPalettePlugin extends Plugin {
         this.prevTags = new OrderedSet<Match>();
         this.suggestionsWorker = new SuggestionsWorker({});
 
-        // Initialize enhanced search service
-        this.searchService = new EnhancedSearchService(this.app, this.settings.enhancedSearch);
+        // Initialize enhanced search service with plugin instance for persistence
+        this.searchService = new EnhancedSearchService(this.app, this.settings.enhancedSearch, this);
         
         // Wait for workspace to be ready before initializing search services
         if (this.app.workspace.layoutReady) {
