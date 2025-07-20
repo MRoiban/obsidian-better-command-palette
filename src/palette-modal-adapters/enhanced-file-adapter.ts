@@ -61,7 +61,24 @@ export default class EnhancedFileAdapter extends SuggestModalAdapter {
                 if (badfileType) return;
 
                 const matches = createPaletteMatchesFromFilePath(this.app.metadataCache, filePath);
-                this.allItems = this.allItems.concat(matches);
+                
+                // Process matches to apply display settings
+                const processedMatches = matches.map(match => {
+                    if (match.id.includes(':')) {
+                        // This is an alias, keep it as is
+                        return match;
+                    } else {
+                        // This is a regular file, process the display path
+                        const displayPath = this.processDisplayPath(match.text);
+                        return new PaletteMatch(
+                            match.id,       // Keep original path as ID
+                            displayPath,    // Use processed path for display
+                            match.tags      // Preserve tags
+                        );
+                    }
+                });
+                
+                this.allItems = this.allItems.concat(processedMatches);
 
                 // Add unresolved links with validation
                 const unresolvedLinks = this.app.metadataCache.unresolvedLinks[filePath];
@@ -83,7 +100,14 @@ export default class EnhancedFileAdapter extends SuggestModalAdapter {
 
             // For previous items we only want the actual file, not any aliases
             if (matches[0]) {
-                this.prevItems.add(matches[0]);
+                // Process the display path according to user settings
+                const displayPath = this.processDisplayPath(filePath);
+                const processedMatch = new PaletteMatch(
+                    filePath,           // Keep original path as ID for file opening
+                    displayPath,        // Use processed path for display
+                    matches[0].tags     // Preserve tags
+                );
+                this.prevItems.add(processedMatch);
             }
         });
     }
