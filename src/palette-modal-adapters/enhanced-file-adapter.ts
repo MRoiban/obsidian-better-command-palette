@@ -111,6 +111,25 @@ export default class EnhancedFileAdapter extends SuggestModalAdapter {
     }
 
     /**
+     * Process display path according to user settings
+     */
+    private processDisplayPath(filePath: string): string {
+        let displayPath = filePath;
+
+        // Build the displayed note name without its full path if required in settings
+        if (this.plugin.settings.displayOnlyNotesNames) {
+            displayPath = filePath.split("/").pop() || filePath;
+        }
+
+        // Build the displayed note name without its Markdown extension if required in settings
+        if (this.plugin.settings.hideMdExtension && displayPath.endsWith(".md")) {
+            displayPath = displayPath.slice(0, -3);
+        }
+
+        return displayPath;
+    }
+
+    /**
      * Override to use enhanced search when available
      */
     async getSearchResults(query: string): Promise<Match[]> {
@@ -125,11 +144,14 @@ export default class EnhancedFileAdapter extends SuggestModalAdapter {
             const enhancedResults = await this.searchService?.search(cleanQuery, 50) || [];
             logger.debug('Enhanced search: Found', enhancedResults.length, 'results for query:', cleanQuery);
             
-            return enhancedResults.map(result => new PaletteMatch(
-                result.id,
-                result.metadata.path,
-                result.metadata.tags || []
-            ));
+            return enhancedResults.map(result => {
+                const displayPath = this.processDisplayPath(result.metadata.path);
+                return new PaletteMatch(
+                    result.metadata.path,  // Use original path as ID for file opening
+                    displayPath,           // Use processed path for display
+                    result.metadata.tags || []
+                );
+            });
         } catch (error) {
             logger.error('Enhanced search failed:', error);
             return [];
@@ -291,11 +313,6 @@ export default class EnhancedFileAdapter extends SuggestModalAdapter {
     }
 
     async onChooseSuggestion(match: Match | null, event?: MouseEvent | KeyboardEvent): Promise<void> {
-        // Record file access in search service
-        if (this.searchService && match) {
-            this.searchService.recordFileAccess(match.text);
-        }
-
         if (!match && event) {
             // Create new file
             const input = this.palette.inputEl;
@@ -314,11 +331,19 @@ export default class EnhancedFileAdapter extends SuggestModalAdapter {
 
         if (!match) return;
 
-        // Handle file or alias selection
-        let filePath = match.text;
+        // For enhanced search results, the match.id contains the original file path
+        // while match.text might be a processed display name
+        let filePath = match.id;
+        
+        // Handle alias selection (format: "alias:path")
         if (match.id.includes(':')) {
             const [, path] = match.id.split(':');
             filePath = path;
+        }
+
+        // Record file access in search service using the original path
+        if (this.searchService) {
+            this.searchService.recordFileAccess(filePath);
         }
 
         const file = this.app.vault.getAbstractFileByPath(filePath);
@@ -387,9 +412,10 @@ export default class EnhancedFileAdapter extends SuggestModalAdapter {
                     continue;
                 }
                 
+                const displayPath = this.processDisplayPath(result.metadata.path);
                 const suggestion = new PaletteMatch(
-                    result.id,
-                    result.metadata.path,
+                    result.metadata.path,  // Use original path as ID for file opening
+                    displayPath,           // Use processed path for display
                     result.metadata.tags || []
                 );
                 if (suggestion) {
