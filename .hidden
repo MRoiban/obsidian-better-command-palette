@@ -1,0 +1,6 @@
+**/.*
+LICENSE
+manifest.json
+README.md
+**/test
+**/*lock*
