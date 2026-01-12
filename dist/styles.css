@@ -1381,35 +1381,27 @@
 
 /* ============================================
    Collapsible Setting Group Styles
-   Uses Obsidian's SettingGroup internally
+   Matches Obsidian's native settings style:
+   - Header outside the card
+   - One card containing all settings
+   - Proper padding inside the card
    ============================================ */
 .bcp-collapsible-group {
-  margin-bottom: 12px;
-  border: 1px solid var(--background-modifier-border);
-  border-radius: var(--radius-m);
-  overflow: hidden;
-  background: var(--background-primary);
-  transition: border-color 0.2s ease;
-}
-.bcp-collapsible-group:hover {
-  border-color: var(--background-modifier-border-hover);
+  margin-bottom: 24px;
 }
 
+/* Header is OUTSIDE the card - no background, no border */
 .bcp-collapsible-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 12px 16px;
-  background: var(--background-secondary);
+  padding: 18px 0 12px 0;
   cursor: pointer;
   user-select: none;
-  transition: background-color 0.15s ease;
+  transition: opacity 0.15s ease;
 }
 .bcp-collapsible-header:hover {
-  background: var(--background-secondary-alt);
-}
-.bcp-collapsible-header:active {
-  background: var(--background-modifier-hover);
+  opacity: 0.8;
 }
 
 .bcp-collapsible-title-group {
@@ -1433,8 +1425,9 @@
 }
 
 .bcp-collapsible-title {
-  font-size: 14px;
-  letter-spacing: 0.01em;
+  font-size: var(--font-ui-medium);
+  font-weight: var(--font-semibold);
+  letter-spacing: 0;
 }
 
 .bcp-collapsible-chevron {
@@ -1449,46 +1442,52 @@
   height: 16px;
 }
 
+/* Content is ONE card containing all settings */
 .bcp-collapsible-content {
-  padding: 0;
-  border-top: 1px solid var(--background-modifier-border);
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-m);
+  overflow: hidden;
   /* Style the inner SettingGroup from Obsidian */
 }
 .bcp-collapsible-content .setting-group {
-  padding: 12px 16px;
+  padding: 0;
 }
 .bcp-collapsible-content {
-  /* Ensure settings inside have proper spacing */
+  /* Reset individual setting-item card styling - one unified card */
 }
 .bcp-collapsible-content .setting-item {
-  padding: 12px 0;
+  padding: 18px 20px;
+  margin: 0;
+  /* Remove individual card styling */
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  /* Only keep bottom divider line */
   border-bottom: 1px solid var(--background-modifier-border);
-}
-.bcp-collapsible-content .setting-item:first-child {
-  padding-top: 4px;
 }
 .bcp-collapsible-content .setting-item:last-child {
   border-bottom: none;
-  padding-bottom: 4px;
 }
 .bcp-collapsible-content {
   /* Style subheadings within groups */
 }
 .bcp-collapsible-content .setting-item.mod-heading {
-  margin-top: 8px;
-  padding-top: 16px;
-  border-top: 1px solid var(--background-modifier-border);
+  margin-top: 0;
+  padding-top: 24px;
+  border: none;
+  border-bottom: 1px solid var(--background-modifier-border);
+  background: transparent;
 }
 .bcp-collapsible-content .setting-item.mod-heading:first-child {
-  margin-top: 0;
-  border-top: none;
+  padding-top: 18px;
 }
 .bcp-collapsible-content .setting-item.mod-heading .setting-item-name {
-  font-size: 13px;
+  font-size: var(--font-ui-medium);
   font-weight: var(--font-semibold);
-  color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
+  color: var(--text-normal);
+  text-transform: none;
+  letter-spacing: 0;
 }
 
 /* Settings container styles */
@@ -1502,7 +1501,9 @@
 }
 .bcp-settings-header-container .setting-item {
   border: none;
-  padding-bottom: 0;
+  padding: 0;
+  background: transparent;
+  border-radius: 0;
 }
 .bcp-settings-header-container .setting-item-info .setting-item-name {
   font-size: 20px;
@@ -1514,6 +1515,8 @@
   gap: 12px;
   font-size: 0.85em;
   color: var(--text-muted);
+  padding: 0;
+  margin-top: 8px;
 }
 .bcp-settings-global-controls .bcp-control-link {
   cursor: pointer;
