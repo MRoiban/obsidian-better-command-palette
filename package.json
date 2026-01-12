@@ -24,6 +24,7 @@
 	"author": "MRoiban",
 	"license": "MIT",
 	"devDependencies": {
+		"@rollup/plugin-alias": "^4.0.4",
 		"@rollup/plugin-commonjs": "^21.0.1",
 		"@rollup/plugin-eslint": "^8.0.1",
 		"@rollup/plugin-node-resolve": "^13.1.3",

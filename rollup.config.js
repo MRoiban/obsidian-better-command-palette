@@ -1,3 +1,4 @@
+import path from 'path';
 import typescript from 'rollup-plugin-typescript2';
 import nodeResolve from '@rollup/plugin-node-resolve';
 import commonjs from '@rollup/plugin-commonjs';
@@ -6,6 +7,7 @@ import { terser } from 'rollup-plugin-terser';
 import copy from 'rollup-plugin-copy';
 import scss from 'rollup-plugin-scss';
 import replace from '@rollup/plugin-replace';
+import alias from '@rollup/plugin-alias';
 
 const isProduction = process.env.NODE_ENV === 'production';
 const isLocal = process.env.DEST === 'local';
@@ -31,6 +33,11 @@ export default {
     },
     external: ['obsidian'],
     plugins: [
+        alias({
+            entries: [
+                { find: /^src\/(.*)/, replacement: path.resolve(__dirname, 'src/$1') }
+            ]
+        }),
         replace({
             'process.env.NODE_ENV': JSON.stringify(isProduction ? 'production' : 'development'),
             preventAssignment: true,
