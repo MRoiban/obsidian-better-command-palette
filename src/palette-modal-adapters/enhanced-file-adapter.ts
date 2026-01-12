@@ -1,0 +1,557 @@
+import {
+    Instruction, Notice, setIcon, TFile,
+} from 'obsidian';
+import {
+    generateHotKeyText,
+    getOrCreateFile,
+    openFileWithEventKeys,
+    OrderedSet,
+    PaletteMatch, SuggestModalAdapter,
+    createPaletteMatchesFromFilePath,
+} from '../utils';
+import { Match, UnsafeAppInterface } from '../types/types';
+import { ActionType } from '../utils/constants';
+import { EnhancedSearchService } from '../search/enhanced-search-service';
+import { logger } from '../utils/logger';
+
+/**
+ * Enhanced file adapter that uses the new search system
+ */
+export default class EnhancedFileAdapter extends SuggestModalAdapter {
+    titleText: string;
+
+    emptyStateText: string;
+
+    app: UnsafeAppInterface;
+
+    allItems: Match[];
+
+    unresolvedItems: OrderedSet<Match>;
+
+    fileSearchPrefix: string;
+
+    private searchService?: EnhancedSearchService;
+
+    constructor(app: any, prevItems: any, plugin: any, palette: any, searchService?: EnhancedSearchService) {
+        super(app, prevItems, plugin, palette);
+        this.searchService = searchService;
+        // Initialize these properties to avoid undefined errors during early access
+        this.unresolvedItems = new OrderedSet<Match>();
+        this.allItems = [];
+    }
+
+    initialize(): void {
+        super.initialize();
+
+        this.titleText = 'Better Command Palette: Files (Enhanced)';
+        this.emptyStateText = 'No matching files.';
+        this.fileSearchPrefix = this.plugin.settings.fileSearchPrefix;
+
+        this.hiddenIds = this.plugin.settings.hiddenFiles;
+        this.hiddenIdsSettingsKey = 'hiddenFiles';
+
+        this.allItems = [];
+        this.unresolvedItems = new OrderedSet<Match>();
+
+        // Load all files like the original adapter
+        this.app.metadataCache.getCachedFiles()
+            .forEach((filePath: string) => {
+                // Validate file path
+                if (!filePath || typeof filePath !== 'string') {
+                    return;
+                }
+
+                const badfileType = this.plugin.settings.fileTypeExclusion.some((suf) => filePath.endsWith(`.${suf}`));
+
+                // If we shouldn't show the file type just return right now
+                if (badfileType) return;
+
+                const matches = createPaletteMatchesFromFilePath(this.app.metadataCache, filePath);
+
+                // Process matches to apply display settings
+                const processedMatches = matches.map((match) => {
+                    if (match.id.includes(':')) {
+                        // This is an alias, keep it as is
+                        return match;
+                    }
+                    // This is a regular file, process the display path
+                    const displayPath = this.processDisplayPath(match.text);
+                    return new PaletteMatch(
+                        match.id, // Keep original path as ID
+                        displayPath, // Use processed path for display
+                        match.tags, // Preserve tags
+                    );
+                });
+
+                this.allItems = this.allItems.concat(processedMatches);
+
+                // Add unresolved links with validation
+                const unresolvedLinks = this.app.metadataCache.unresolvedLinks[filePath];
+                if (unresolvedLinks && typeof unresolvedLinks === 'object') {
+                    Object.keys(unresolvedLinks).forEach((p) => {
+                        if (p && typeof p === 'string' && p.trim()) {
+                            this.unresolvedItems.add(new PaletteMatch(p, p));
+                        }
+                    });
+                }
+            });
+
+        // Add the deduped links to all items
+        this.allItems = this.allItems.concat(Array.from(this.unresolvedItems.values())).reverse();
+
+        // Use obsidian's last open files as the previous items
+        [...this.app.workspace.getLastOpenFiles()].reverse().forEach((filePath) => {
+            const matches = createPaletteMatchesFromFilePath(this.app.metadataCache, filePath);
+
+            // For previous items we only want the actual file, not any aliases
+            if (matches[0]) {
+                // Process the display path according to user settings
+                const displayPath = this.processDisplayPath(filePath);
+                const processedMatch = new PaletteMatch(
+                    filePath, // Keep original path as ID for file opening
+                    displayPath, // Use processed path for display
+                    matches[0].tags, // Preserve tags
+                );
+                this.prevItems.add(processedMatch);
+            }
+        });
+    }
+
+    mount(): void {
+        this.keymapHandlers = [
+            this.palette.scope.register(['Mod'], this.plugin.settings.commandSearchHotkey, () => this.palette.changeActionType(ActionType.Commands)),
+            this.palette.scope.register(['Mod'], this.plugin.settings.tagSearchHotkey, () => this.palette.changeActionType(ActionType.Tags)),
+        ];
+    }
+
+    getInstructions(): Instruction[] {
+        const { openInNewTabMod, createNewFileMod } = this.plugin.settings;
+        return [
+            { command: generateHotKeyText({ modifiers: [], key: 'ENTER' }, this.plugin.settings), purpose: 'Open file' },
+            { command: generateHotKeyText({ modifiers: [openInNewTabMod], key: 'ENTER' }, this.plugin.settings), purpose: 'Open file in new pane' },
+            { command: generateHotKeyText({ modifiers: [createNewFileMod], key: 'ENTER' }, this.plugin.settings), purpose: 'Create file' },
+            { command: generateHotKeyText({ modifiers: ['Mod'], key: this.plugin.settings.commandSearchHotkey }, this.plugin.settings), purpose: 'Search Commands' },
+            { command: generateHotKeyText({ modifiers: ['Mod'], key: this.plugin.settings.tagSearchHotkey }, this.plugin.settings), purpose: 'Search Tags' },
+        ];
+    }
+
+    cleanQuery(query: string): string {
+        return query.replace(this.fileSearchPrefix, '');
+    }
+
+    /**
+     * Process display path according to user settings
+     */
+    private processDisplayPath(filePath: string): string {
+        let displayPath = filePath;
+
+        // Build the displayed note name without its full path if required in settings
+        if (this.plugin.settings.displayOnlyNotesNames) {
+            displayPath = filePath.split('/').pop() || filePath;
+        }
+
+        // Build the displayed note name without its Markdown extension if required in settings
+        if (this.plugin.settings.hideMdExtension && displayPath.endsWith('.md')) {
+            displayPath = displayPath.slice(0, -3);
+        }
+
+        return displayPath;
+    }
+
+    /**
+     * Override to use enhanced search when available
+     */
+    async getSearchResults(query: string): Promise<Match[]> {
+        logger.debug('Enhanced search: getSearchResults called with:', query);
+
+        const cleanQuery = this.cleanQuery(query);
+        if (cleanQuery.length < 2) {
+            return [];
+        }
+
+        // Check if search service is ready before attempting search
+        if (!this.searchService?.isReady()) {
+            logger.debug('Enhanced search: Service not ready, returning empty results');
+            return [];
+        }
+
+        try {
+            const enhancedResults = await this.searchService.search(cleanQuery, 50);
+            logger.debug('Enhanced search: Found', enhancedResults.length, 'results for query:', cleanQuery);
+
+            return enhancedResults.map((result) => {
+                const displayPath = this.processDisplayPath(result.metadata.path);
+                return new PaletteMatch(
+                    result.metadata.path, // Use original path as ID for file opening
+                    displayPath, // Use processed path for display
+                    result.metadata.tags || [],
+                );
+            });
+        } catch (error) {
+            logger.error('Enhanced search failed:', error);
+            return [];
+        }
+    }
+
+    async streamSearchResults(
+        query: string,
+        options: {
+            limit: number;
+            signal?: AbortSignal;
+            onUpdate: (matches: Match[], done: boolean) => void;
+        },
+    ): Promise<void> {
+        logger.debug('Enhanced search: streamSearchResults called with:', query);
+
+        const cleanQuery = this.cleanQuery(query);
+        if (cleanQuery.length < 2 || !this.searchService?.isReady()) {
+            options.onUpdate([], true);
+            return;
+        }
+
+        try {
+            await this.searchService.searchStream(cleanQuery, options.limit, {
+                signal: options.signal,
+                onChunk: (results, status) => {
+                    if (options.signal?.aborted) {
+                        return;
+                    }
+
+                    const seen = new Set<string>();
+                    const matches = results.reduce<Match[]>((acc, result) => {
+                        if (seen.has(result.metadata.path)) {
+                            return acc;
+                        }
+                        seen.add(result.metadata.path);
+
+                        const displayPath = this.processDisplayPath(result.metadata.path);
+                        acc.push(new PaletteMatch(
+                            result.metadata.path,
+                            displayPath,
+                            result.metadata.tags || [],
+                        ));
+                        return acc;
+                    }, []);
+
+                    options.onUpdate(matches, status.done);
+                },
+            });
+        } catch (error) {
+            if (options.signal?.aborted) {
+                return;
+            }
+            logger.error('Enhanced search streaming failed:', error);
+            options.onUpdate([], true);
+        }
+    }
+
+    renderSuggestion(match: Match, content: HTMLElement, aux?: HTMLElement): void {
+        // Always use the original file adapter rendering style
+        this.renderOriginalSuggestion(match, content);
+    }
+
+    private renderOriginalSuggestion(match: Match, content: HTMLElement): void {
+        let noteName = match.text;
+
+        // Build the displayed note name without its full path if required in settings
+        if (this.plugin.settings.displayOnlyNotesNames) {
+            noteName = match.text.split('/').pop() || match.text;
+        }
+
+        // Build the displayed note name without its Markdown extension if required in settings
+        if (this.plugin.settings.hideMdExtension && noteName.endsWith('.md')) {
+            noteName = noteName.slice(0, -3);
+        }
+
+        // Create main title container
+        const suggestionEl = content.createEl('div', {
+            cls: 'suggestion-title',
+        });
+
+        // Add file type indicator
+        this.addFileTypeIndicator(suggestionEl, match.text);
+
+        // Add recently accessed indicator if applicable
+        if (this.isRecentlyAccessed(match)) {
+            suggestionEl.createEl('div', { cls: 'recent-indicator' });
+        }
+
+        // Smart path rendering - show folder structure more intelligently
+        if (!this.plugin.settings.displayOnlyNotesNames && match.text.includes('/')) {
+            this.renderSmartPath(suggestionEl, match.text, noteName);
+        } else {
+            suggestionEl.createEl('span', {
+                cls: 'path-part filename',
+                text: noteName,
+            });
+        }
+
+        // Add unresolved styling if this is an unresolved link
+        if (this.unresolvedItems.has(match)) {
+            suggestionEl.addClass('unresolved');
+        }
+
+        // Handle aliases
+        if (match.id.includes(':')) {
+            suggestionEl.createEl('span', {
+                cls: 'suggestion-name',
+                text: match.text,
+            }).ariaLabel = 'Alias';
+
+            setIcon(suggestionEl, 'right-arrow-with-tail');
+
+            const [, path] = match.id.split(':');
+            suggestionEl.createEl('span', {
+                cls: 'suggestion-note',
+                text: path,
+            });
+        }
+
+        // Enhanced tag rendering
+        if (match.tags && match.tags.length > 0) {
+            const tagsEl = content.createEl('div', {
+                cls: 'suggestion-note',
+            });
+
+            match.tags.forEach((tag) => {
+                if (tag.trim()) {
+                    tagsEl.createEl('span', {
+                        cls: 'tag',
+                        text: tag.startsWith('#') ? tag : `#${tag}`,
+                    });
+                }
+            });
+        }
+    }
+
+    /**
+     * Add file type indicator based on file extension
+     */
+    private addFileTypeIndicator(container: HTMLElement, filePath: string): void {
+        const extension = this.getFileExtension(filePath);
+        if (!extension) return;
+
+        let typeClass = 'md';
+        let typeText = 'MD';
+
+        switch (extension.toLowerCase()) {
+            case 'md':
+                typeClass = 'md';
+                typeText = 'MD';
+                break;
+            case 'txt':
+                typeClass = 'txt';
+                typeText = 'TXT';
+                break;
+            case 'pdf':
+                typeClass = 'pdf';
+                typeText = 'PDF';
+                break;
+            case 'png':
+            case 'jpg':
+            case 'jpeg':
+            case 'gif':
+            case 'svg':
+                typeClass = 'img';
+                typeText = 'IMG';
+                break;
+            default:
+                typeText = extension.toUpperCase().substring(0, 3);
+        }
+
+        container.createEl('span', {
+            cls: `file-type-indicator ${typeClass}`,
+            text: typeText,
+        });
+    }
+
+    /**
+     * Get file extension from path
+     */
+    private getFileExtension(path: string): string | null {
+        const match = path.match(/\.([^.]+)$/);
+        return match ? match[1] : null;
+    }
+
+    /**
+     * Smart path rendering that emphasizes filename while showing context
+     * Now relies on CSS text-overflow: ellipsis for clipping
+     */
+    private renderSmartPath(container: HTMLElement, fullPath: string, displayName: string): void {
+        // Simply set the full path and let CSS handle the ellipsis
+        container.textContent = fullPath;
+
+        // Always set the full path as tooltip
+        container.title = fullPath;
+    }
+
+    /**
+     * Check if file was recently accessed
+     */
+    private isRecentlyAccessed(match: Match): boolean {
+        if (!this.searchService) return false;
+
+        const lastOpened = this.searchService.getLastOpened?.(match.text);
+        if (!lastOpened) return false;
+
+        // Consider files accessed in the last 24 hours as recent
+        const daysSince = (Date.now() - lastOpened) / (1000 * 60 * 60 * 24);
+        return daysSince < 1;
+    }
+
+    async onChooseSuggestion(match: Match | null, event?: MouseEvent | KeyboardEvent): Promise<void> {
+        if (!match && event) {
+            // Create new file
+            const input = this.palette.inputEl;
+            const filename = this.cleanQuery(input.value);
+
+            if (filename) {
+                try {
+                    const file = await getOrCreateFile(this.app, filename);
+                    openFileWithEventKeys(this.app, this.plugin.settings, file, event);
+                } catch (error) {
+                    new Notice(`Failed to create file: ${error.message}`);
+                }
+            }
+            return;
+        }
+
+        if (!match) return;
+
+        // For enhanced search results, the match.id contains the original file path
+        // while match.text might be a processed display name
+        let filePath = match.id;
+
+        // Handle alias selection (format: "alias:path")
+        if (match.id.includes(':')) {
+            const [, path] = match.id.split(':');
+            filePath = path;
+        }
+
+        // Record file access in search service using the original path
+        if (this.searchService) {
+            this.searchService.recordFileAccess(filePath);
+        }
+
+        const file = this.app.vault.getAbstractFileByPath(filePath);
+        if (!file) {
+            new Notice(`File not found: ${filePath}`);
+            return;
+        }
+
+        // Ensure it's a TFile before passing to openFileWithEventKeys
+        if (!(file instanceof TFile)) {
+            new Notice(`Path is not a file: ${filePath}`);
+            return;
+        }
+
+        try {
+            openFileWithEventKeys(this.app, this.plugin.settings, file, event);
+
+            // Add to previous items
+            this.prevItems.add(match);
+        } catch (error) {
+            new Notice(`Failed to open file: ${error.message}`);
+        }
+    }
+
+    /**
+     * Indicates this adapter uses enhanced search and should bypass worker-based search
+     */
+    usesEnhancedSearch(): boolean {
+        return this.searchService !== undefined; // Return true if we have a search service
+    }
+
+    /**
+     * Perform enhanced search and update modal suggestions directly
+     */
+    async performEnhancedSearch(query: string): Promise<void> {
+        if (!this.searchService) {
+            logger.debug('Enhanced search: No search service available');
+            return;
+        }
+
+        try {
+            const cleanQuery = this.cleanQuery(query);
+            logger.debug('Enhanced search: Searching for:', cleanQuery);
+
+            const startTime = Date.now();
+            const enhancedResults = this.searchService.search(cleanQuery, this.plugin.settings.suggestionLimit);
+            const searchTime = Date.now() - startTime;
+
+            if (enhancedResults.length === 0) {
+                return;
+            }
+
+            logger.debug('Enhanced search: Found', enhancedResults.length, 'results');
+
+            const suggestions: Match[] = [];
+            const processedPaths = new Set<string>();
+
+            for (const result of enhancedResults.slice(0, this.plugin.settings.suggestionLimit)) {
+                if (processedPaths.has(result.metadata.path)) {
+                    continue;
+                }
+                processedPaths.add(result.metadata.path);
+
+                const file = this.app.vault.getAbstractFileByPath(result.metadata.path) as TFile;
+                if (!file) {
+                    continue;
+                }
+
+                const displayPath = this.processDisplayPath(result.metadata.path);
+                const suggestion = new PaletteMatch(
+                    result.metadata.path, // Use original path as ID for file opening
+                    displayPath, // Use processed path for display
+                    result.metadata.tags || [],
+                );
+                if (suggestion) {
+                    suggestions.push(suggestion);
+                }
+            }
+
+            this.palette.currentSuggestions = suggestions;
+            this.palette.limit = suggestions.length;
+        } catch (error) {
+            logger.error('Enhanced search: Error during search:', error);
+            // Fallback to original search behavior
+            this.palette.getSuggestionsAsync(query);
+        }
+    }
+
+    private loadAllFiles(): void {
+        // Get all markdown files and create matches
+        const files = this.app.vault.getMarkdownFiles();
+
+        this.allItems = files
+            .filter((file) => {
+                // Apply file type exclusions
+                const badfileType = this.plugin.settings.fileTypeExclusion.some(
+                    (suffix) => file.path.endsWith(`.${suffix}`),
+                );
+                return !badfileType;
+            })
+            .flatMap((file) => {
+                const matches: Match[] = [];
+
+                // Add main file
+                matches.push(new PaletteMatch(file.path, file.path));
+
+                // Add aliases if any
+                const metadata = this.app.metadataCache.getFileCache(file);
+                if (metadata?.frontmatter?.aliases) {
+                    const aliases = Array.isArray(metadata.frontmatter.aliases)
+                        ? metadata.frontmatter.aliases
+                        : [metadata.frontmatter.aliases];
+
+                    aliases.forEach((alias: string) => {
+                        if (alias && typeof alias === 'string') {
+                            matches.push(new PaletteMatch(`${alias}:${file.path}`, alias));
+                        }
+                    });
+                }
+
+                return matches;
+            });
+    }
+}

@@ -1,0 +1,1526 @@
+@charset "UTF-8";
+/* Import Flexoki Color Palette */
+/* Flexoki Color Palette for Better Command Palette */
+/* Color palette from: https://stephango.com/flexoki */
+:root {
+  /* Base Colors - Flexoki Palette */
+  --flexoki-black: #100F0F;
+  --flexoki-base-950: #1C1B1A;
+  --flexoki-base-900: #282726;
+  --flexoki-base-850: #343331;
+  --flexoki-base-800: #403E3C;
+  --flexoki-base-700: #575653;
+  --flexoki-base-600: #6F6E69;
+  --flexoki-base-500: #878580;
+  --flexoki-base-300: #B7B5AC;
+  --flexoki-base-200: #CECDC3;
+  --flexoki-base-150: #DAD8CE;
+  --flexoki-base-100: #E6E4D9;
+  --flexoki-base-50: #F2F0E5;
+  --flexoki-paper: #FFFCF0;
+  /* Accent Colors - Main values (600 for light, 400 for dark) */
+  --flexoki-red-600: #AF3029;
+  --flexoki-red-400: #D14D41;
+  --flexoki-orange-600: #BC5215;
+  --flexoki-orange-400: #DA702C;
+  --flexoki-yellow-600: #AD8301;
+  --flexoki-yellow-400: #D0A215;
+  --flexoki-green-600: #66800B;
+  --flexoki-green-400: #879A39;
+  --flexoki-cyan-600: #24837B;
+  --flexoki-cyan-400: #3AA99F;
+  --flexoki-blue-600: #205EA6;
+  --flexoki-blue-400: #4385BE;
+  --flexoki-purple-600: #5E409D;
+  --flexoki-purple-400: #8B7EC8;
+  --flexoki-magenta-600: #A02F6F;
+  --flexoki-magenta-400: #CE5D97;
+  /* Extended Palette - Additional shades for complex applications */
+  --flexoki-red-50: #FFF7F7;
+  --flexoki-red-100: #FEEBEB;
+  --flexoki-red-200: #FCD6D6;
+  --flexoki-red-300: #F9B3B3;
+  --flexoki-red-500: #C94A3D;
+  --flexoki-red-700: #922B24;
+  --flexoki-red-800: #7A241E;
+  --flexoki-red-900: #651E19;
+  --flexoki-red-950: #4A1612;
+  --flexoki-orange-50: #FFFAF7;
+  --flexoki-orange-100: #FEF2E8;
+  --flexoki-orange-200: #FDE4D1;
+  --flexoki-orange-300: #FBCBA4;
+  --flexoki-orange-500: #C8621F;
+  --flexoki-orange-700: #954713;
+  --flexoki-orange-800: #7D3C11;
+  --flexoki-orange-900: #68320F;
+  --flexoki-orange-950: #4D250B;
+  --flexoki-yellow-50: #FFFDF7;
+  --flexoki-yellow-100: #FEFAEB;
+  --flexoki-yellow-200: #FDF4D7;
+  --flexoki-yellow-300: #FAEAAF;
+  --flexoki-yellow-500: #B89103;
+  --flexoki-yellow-700: #8A6F02;
+  --flexoki-yellow-800: #745E02;
+  --flexoki-yellow-900: #614E02;
+  --flexoki-yellow-950: #483A01;
+  --flexoki-green-50: #F9FBF7;
+  --flexoki-green-100: #F1F6EA;
+  --flexoki-green-200: #E3EDD5;
+  --flexoki-green-300: #CCDBB0;
+  --flexoki-green-500: #70890C;
+  --flexoki-green-700: #556A09;
+  --flexoki-green-800: #485907;
+  --flexoki-green-900: #3C4A06;
+  --flexoki-green-950: #2D3705;
+  --flexoki-cyan-50: #F7FEFE;
+  --flexoki-cyan-100: #ECFCFB;
+  --flexoki-cyan-200: #D9F9F7;
+  --flexoki-cyan-300: #B8F3F0;
+  --flexoki-cyan-500: #278F85;
+  --flexoki-cyan-700: #1D6B65;
+  --flexoki-cyan-800: #195A55;
+  --flexoki-cyan-900: #154B47;
+  --flexoki-cyan-950: #103835;
+  --flexoki-blue-50: #F7FAFE;
+  --flexoki-blue-100: #EBF4FD;
+  --flexoki-blue-200: #D6E9FB;
+  --flexoki-blue-300: #B5D5F8;
+  --flexoki-blue-500: #246BB0;
+  --flexoki-blue-700: #1B4F87;
+  --flexoki-blue-800: #174270;
+  --flexoki-blue-900: #13375C;
+  --flexoki-blue-950: #0E2943;
+  --flexoki-purple-50: #FAFAFE;
+  --flexoki-purple-100: #F3F0FD;
+  --flexoki-purple-200: #E7E0FA;
+  --flexoki-purple-300: #D4C4F6;
+  --flexoki-purple-500: #6747A4;
+  --flexoki-purple-700: #4E3687;
+  --flexoki-purple-800: #422E71;
+  --flexoki-purple-900: #37265D;
+  --flexoki-purple-950: #291D44;
+  --flexoki-magenta-50: #FEF8FB;
+  --flexoki-magenta-100: #FCEFF6;
+  --flexoki-magenta-200: #F9DFED;
+  --flexoki-magenta-300: #F4C2DE;
+  --flexoki-magenta-500: #A93375;
+  --flexoki-magenta-700: #89275B;
+  --flexoki-magenta-800: #73214C;
+  --flexoki-magenta-900: #5F1C40;
+  --flexoki-magenta-950: #46152F;
+}
+
+/* Light Theme Mappings */
+:root,
+.theme-light {
+  /* Base mappings for light theme */
+  --bcp-bg: var(--flexoki-paper);
+  --bcp-bg-2: var(--flexoki-base-50);
+  --bcp-ui: var(--flexoki-base-100);
+  --bcp-ui-2: var(--flexoki-base-150);
+  --bcp-ui-3: var(--flexoki-base-200);
+  --bcp-tx: var(--flexoki-black);
+  --bcp-tx-2: var(--flexoki-base-600);
+  --bcp-tx-3: var(--flexoki-base-300);
+  /* Accent colors for light theme */
+  --bcp-re: var(--flexoki-red-600);
+  --bcp-re-2: var(--flexoki-red-400);
+  --bcp-or: var(--flexoki-orange-600);
+  --bcp-or-2: var(--flexoki-orange-400);
+  --bcp-ye: var(--flexoki-yellow-600);
+  --bcp-ye-2: var(--flexoki-yellow-400);
+  --bcp-gr: var(--flexoki-green-600);
+  --bcp-gr-2: var(--flexoki-green-400);
+  --bcp-cy: var(--flexoki-cyan-600);
+  --bcp-cy-2: var(--flexoki-cyan-400);
+  --bcp-bl: var(--flexoki-blue-600);
+  --bcp-bl-2: var(--flexoki-blue-400);
+  --bcp-pu: var(--flexoki-purple-600);
+  --bcp-pu-2: var(--flexoki-purple-400);
+  --bcp-ma: var(--flexoki-magenta-600);
+  --bcp-ma-2: var(--flexoki-magenta-400);
+}
+
+/* Dark Theme Mappings */
+.theme-dark {
+  /* Base mappings for dark theme */
+  --bcp-bg: var(--flexoki-black);
+  --bcp-bg-2: var(--flexoki-base-950);
+  --bcp-ui: var(--flexoki-base-900);
+  --bcp-ui-2: var(--flexoki-base-850);
+  --bcp-ui-3: var(--flexoki-base-800);
+  --bcp-tx: var(--flexoki-base-200);
+  --bcp-tx-2: var(--flexoki-base-500);
+  --bcp-tx-3: var(--flexoki-base-700);
+  /* Accent colors for dark theme */
+  --bcp-re: var(--flexoki-red-400);
+  --bcp-re-2: var(--flexoki-red-600);
+  --bcp-or: var(--flexoki-orange-400);
+  --bcp-or-2: var(--flexoki-orange-600);
+  --bcp-ye: var(--flexoki-yellow-400);
+  --bcp-ye-2: var(--flexoki-yellow-600);
+  --bcp-gr: var(--flexoki-green-400);
+  --bcp-gr-2: var(--flexoki-green-600);
+  --bcp-cy: var(--flexoki-cyan-400);
+  --bcp-cy-2: var(--flexoki-cyan-600);
+  --bcp-bl: var(--flexoki-blue-400);
+  --bcp-bl-2: var(--flexoki-blue-600);
+  --bcp-pu: var(--flexoki-purple-400);
+  --bcp-pu-2: var(--flexoki-purple-600);
+  --bcp-ma: var(--flexoki-magenta-400);
+  --bcp-ma-2: var(--flexoki-magenta-600);
+}
+
+/* Flexoki-Enhanced Component Styles */
+.better-command-palette {
+  /* Override Obsidian variables with Flexoki equivalents where appropriate */
+  --text-normal: var(--bcp-tx);
+  --text-muted: var(--bcp-tx-2);
+  --text-faint: var(--bcp-tx-3);
+  --text-accent: var(--color-accent);
+  --text-error: var(--bcp-re);
+  --text-success: var(--bcp-gr);
+  --text-warning: var(--bcp-or);
+  --background-primary: var(--bcp-bg);
+  --background-primary-alt: var(--bcp-bg-2);
+  --background-secondary: var(--bcp-ui);
+  --background-secondary-alt: var(--bcp-ui-2);
+  --background-modifier-border: var(--bcp-ui-3);
+  --background-modifier-border-hover: var(--bcp-tx-3);
+  --background-modifier-border-focus: var(--color-accent);
+  --background-modifier-hover: rgba(var(--flexoki-base-500-rgb), 0.1);
+  --background-modifier-active-hover: rgba(var(--accent-h), var(--accent-s), var(--accent-l), 0.1);
+  --background-modifier-selected: rgba(var(--accent-h), var(--accent-s), var(--accent-l), 0.15);
+  /* File type specific colors using Flexoki accents */
+}
+.better-command-palette .file-type-indicator.md {
+  background: rgba(var(--bcp-bl-rgb), 0.15);
+  color: var(--bcp-bl);
+}
+.better-command-palette .file-type-indicator.txt {
+  background: rgba(var(--bcp-tx-2-rgb), 0.15);
+  color: var(--bcp-tx-2);
+}
+.better-command-palette .file-type-indicator.pdf {
+  background: rgba(var(--bcp-re-rgb), 0.15);
+  color: var(--bcp-re);
+}
+.better-command-palette .file-type-indicator.img {
+  background: rgba(var(--bcp-gr-rgb), 0.15);
+  color: var(--bcp-gr);
+}
+.better-command-palette .file-type-indicator.json {
+  background: rgba(var(--bcp-ye-rgb), 0.15);
+  color: var(--bcp-ye);
+}
+.better-command-palette .file-type-indicator.js, .better-command-palette .file-type-indicator.ts {
+  background: rgba(var(--bcp-cy-rgb), 0.15);
+  color: var(--bcp-cy);
+}
+.better-command-palette .file-type-indicator.css, .better-command-palette .file-type-indicator.scss {
+  background: rgba(var(--bcp-pu-rgb), 0.15);
+  color: var(--bcp-pu);
+}
+.better-command-palette .file-type-indicator.html {
+  background: rgba(var(--bcp-ma-rgb), 0.15);
+  color: var(--bcp-ma);
+}
+.better-command-palette {
+  /* Enhanced suggestion hotkeys with Flexoki colors */
+}
+.better-command-palette .suggestion-hotkey.recent {
+  background: rgba(var(--bcp-bl-rgb), 0.15);
+  color: var(--bcp-bl);
+  border: 1px solid rgba(var(--bcp-bl-rgb), 0.3);
+}
+.better-command-palette .suggestion-hotkey.modified {
+  background: rgba(var(--bcp-gr-rgb), 0.15);
+  color: var(--bcp-gr);
+  border: 1px solid rgba(var(--bcp-gr-rgb), 0.3);
+}
+.better-command-palette .suggestion-hotkey.favorite {
+  background: rgba(var(--bcp-ye-rgb), 0.15);
+  color: var(--bcp-ye);
+  border: 1px solid rgba(var(--bcp-ye-rgb), 0.3);
+}
+.better-command-palette {
+  /* Score visualization using Flexoki accent colors */
+}
+.better-command-palette .search-result-scores .score-fill {
+  background: linear-gradient(90deg, var(--bcp-bl), var(--bcp-cy));
+}
+.better-command-palette .search-result-scores .score-item.fuzzy .score-fill {
+  background: var(--bcp-bl);
+}
+.better-command-palette .search-result-scores .score-item.content .score-fill {
+  background: var(--bcp-gr);
+}
+.better-command-palette .search-result-scores .score-item.path .score-fill {
+  background: var(--bcp-or);
+}
+.better-command-palette .search-result-scores .score-item.recency .score-fill {
+  background: var(--bcp-pu);
+}
+
+/* RGB variants for rgba() usage */
+:root {
+  --flexoki-base-500-rgb: 135, 133, 128;
+  --bcp-bl-rgb: 32, 94, 166; /* Light theme blue-600 */
+  --bcp-bl-2-rgb: 67, 133, 190; /* Light theme blue-400 */
+  --bcp-tx-2-rgb: 111, 110, 105;
+  --bcp-re-rgb: 175, 48, 41;
+  --bcp-gr-rgb: 102, 128, 11;
+  --bcp-ye-rgb: 173, 131, 1;
+  --bcp-cy-rgb: 36, 131, 123;
+  --bcp-pu-rgb: 94, 64, 157;
+  --bcp-ma-rgb: 160, 47, 111;
+  --bcp-or-rgb: 188, 82, 21;
+}
+
+.theme-dark {
+  --bcp-bl-rgb: 67, 133, 190; /* Dark theme blue-400 */
+  --bcp-bl-2-rgb: 32, 94, 166; /* Dark theme blue-600 */
+  --bcp-re-rgb: 209, 77, 65;
+  --bcp-gr-rgb: 135, 154, 57;
+  --bcp-ye-rgb: 208, 162, 21;
+  --bcp-cy-rgb: 58, 169, 159;
+  --bcp-pu-rgb: 139, 126, 200;
+  --bcp-ma-rgb: 206, 93, 151;
+  --bcp-or-rgb: 218, 112, 44;
+}
+
+/* Better Command Palette Enhanced File Search Variables */
+:root {
+  --bcp-transition-speed: 0.15s;
+  --bcp-hover-lift: -1px;
+  --bcp-border-radius: 6px;
+  --bcp-file-indicator-size: 16px;
+  --bcp-tag-spacing: 4px;
+  --bcp-recent-indicator-width: 3px;
+  --bcp-quick-action-size: 24px;
+}
+
+.better-command-palette .better-command-palette-title {
+  color: var(--text-accent);
+  margin: 5px;
+  font-weight: 600;
+  font-size: 13px;
+  letter-spacing: 0.3px;
+}
+.better-command-palette .hidden-items-header {
+  margin: 0px;
+  margin-left: 13px;
+  margin-top: 10px;
+  font-size: 15px;
+  color: var(--text-faint);
+  transition: color 0.15s ease;
+}
+.better-command-palette .hidden-items-header:hover {
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.better-command-palette .suggestion-item {
+  position: relative;
+  border-radius: 6px;
+  transition: all 0.15s ease;
+  border: 1px solid transparent;
+}
+.better-command-palette .suggestion-item:hover {
+  background: var(--background-modifier-hover);
+  border-color: var(--background-modifier-border);
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+.better-command-palette .suggestion-item.is-selected {
+  background: var(--background-modifier-active-hover);
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 1px var(--color-accent);
+}
+.better-command-palette .suggestion-item.hidden {
+  color: var(--text-accent);
+  opacity: 0.6;
+}
+.better-command-palette .suggestion-item.hidden .suggestion-flair {
+  transform: rotate(45deg);
+  transition: transform 0.2s ease;
+}
+.better-command-palette .suggestion-item .suggestion-flair {
+  color: var(--text-faint);
+  margin-right: 10px;
+  transition: all 0.15s ease;
+  opacity: 0.7;
+}
+.better-command-palette .suggestion-item .suggestion-flair:hover {
+  opacity: 1;
+  color: var(--text-muted);
+  transform: scale(1.1);
+}
+.better-command-palette .suggestion-item .suggestion-hotkey {
+  white-space: nowrap;
+  margin-left: 10px;
+  padding: 2px 6px;
+  background: var(--background-modifier-border);
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-muted);
+  transition: all 0.15s ease;
+}
+.better-command-palette .suggestion-item .suggestion-hotkey.recent {
+  background: rgba(var(--bcp-bl-rgb), 0.15);
+  color: var(--bcp-bl);
+  border: 1px solid rgba(var(--bcp-bl-rgb), 0.3);
+}
+.better-command-palette .suggestion-item .suggestion-hotkey.modified {
+  background: rgba(var(--bcp-gr-rgb), 0.15);
+  color: var(--bcp-gr);
+  border: 1px solid rgba(var(--bcp-gr-rgb), 0.3);
+}
+.better-command-palette .suggestion-item .suggestion-content {
+  flex: 1;
+  min-width: 0;
+}
+.better-command-palette .suggestion-item .suggestion-content svg {
+  margin: 0px 5px;
+  color: var(--text-muted);
+  transition: color 0.15s ease;
+}
+.better-command-palette .suggestion-item .suggestion-aux {
+  flex-direction: row-reverse;
+  align-items: center;
+}
+.better-command-palette .suggestion-item .suggestion-title {
+  display: flex;
+  align-items: center;
+  font-weight: 500;
+  color: var(--text-normal);
+  line-height: 1.3;
+  margin-bottom: 2px;
+  /* Prevent title from expanding width - clip with ellipsis */
+  max-width: 100%;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  /* Smart path styling */
+}
+.better-command-palette .suggestion-item .suggestion-title .path-part {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.better-command-palette .suggestion-item .suggestion-title .path-part.folder {
+  color: var(--text-muted);
+  opacity: 0.8;
+}
+.better-command-palette .suggestion-item .suggestion-title .path-part.filename {
+  color: var(--text-normal);
+  font-weight: 600;
+}
+.better-command-palette .suggestion-item .suggestion-title {
+  /* Ensure ellipsis for any path elements */
+}
+.better-command-palette .suggestion-item .suggestion-title .path-ellipsis {
+  color: var(--text-muted);
+}
+.better-command-palette .suggestion-item .suggestion-note {
+  flex: 1;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.2;
+  margin-top: 1px;
+  /* Tag styling improvements */
+}
+.better-command-palette .suggestion-item .suggestion-note .tag {
+  display: inline-block;
+  background: var(--tag-background);
+  color: var(--tag-color);
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-size: 10px;
+  margin-right: 4px;
+  border: 1px solid var(--background-modifier-border);
+  transition: all 0.15s ease;
+}
+.better-command-palette .suggestion-item .suggestion-note .tag:hover {
+  background: var(--background-modifier-hover);
+  transform: translateY(-1px);
+}
+.better-command-palette .suggestion-item .unresolved {
+  color: var(--text-muted);
+  position: relative;
+}
+.better-command-palette .suggestion-item .unresolved::after {
+  content: "(Unresolved)";
+  color: var(--text-faint);
+  margin-left: 6px;
+  font-size: 10px;
+  opacity: 0.7;
+  font-style: italic;
+}
+.better-command-palette .suggestion-item .unresolved::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 50%;
+  width: 3px;
+  height: 3px;
+  background: var(--color-orange);
+  border-radius: 50%;
+  transform: translateY(-50%);
+  margin-right: 6px;
+}
+.better-command-palette .suggestion-item {
+  /* File type indicators */
+}
+.better-command-palette .suggestion-item .file-type-indicator {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 3px;
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  margin-right: 6px;
+  opacity: 0.8;
+}
+.better-command-palette .suggestion-item .file-type-indicator.md {
+  background: rgba(var(--bcp-bl-rgb), 0.2);
+  color: var(--bcp-bl);
+}
+.better-command-palette .suggestion-item .file-type-indicator.txt {
+  background: rgba(var(--bcp-tx-2-rgb), 0.2);
+  color: var(--bcp-tx-2);
+}
+.better-command-palette .suggestion-item .file-type-indicator.pdf {
+  background: rgba(var(--bcp-re-rgb), 0.2);
+  color: var(--bcp-re);
+}
+.better-command-palette .suggestion-item .file-type-indicator.img {
+  background: rgba(var(--bcp-gr-rgb), 0.2);
+  color: var(--bcp-gr);
+}
+.better-command-palette .suggestion-item {
+  /* Recently accessed indicator */
+}
+.better-command-palette .suggestion-item .recent-indicator {
+  position: absolute;
+  left: -2px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 3px;
+  height: 12px;
+  background: var(--color-accent);
+  border-radius: 0 2px 2px 0;
+  opacity: 0.8;
+}
+.better-command-palette .suggestion-item {
+  /* Hover reveal actions */
+}
+.better-command-palette .suggestion-item .quick-actions {
+  opacity: 0;
+  transition: opacity 0.2s ease;
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+.better-command-palette .suggestion-item .quick-actions .quick-action {
+  padding: 2px 4px;
+  border-radius: 3px;
+  background: var(--background-secondary);
+  color: var(--text-muted);
+  font-size: 10px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.better-command-palette .suggestion-item .quick-actions .quick-action:hover {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+  transform: scale(1.05);
+}
+.better-command-palette .suggestion-item:hover .quick-actions {
+  opacity: 1;
+}
+
+/* Settings Styles */
+.macro-setting {
+  flex-wrap: wrap;
+}
+.macro-setting .setting-item-name {
+  font-weight: bold;
+}
+.macro-setting .macro-main-settings {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 80% 20%;
+  border-top: solid 1px var(--background-modifier-border);
+  margin-top: 10px;
+}
+.macro-setting .macro-main-settings * {
+  margin-top: 10px;
+}
+.macro-setting .macro-command {
+  display: flex;
+  align-items: center;
+  width: 100%;
+}
+.macro-setting .macro-command button {
+  margin-left: 30px;
+  margin-right: 20px;
+}
+
+/* Enhanced Search Result Styles */
+.enhanced-search-result-item {
+  padding: 8px 12px;
+  border-radius: 4px;
+  margin: 2px 0;
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  transition: all 0.2s ease;
+}
+.enhanced-search-result-item:hover {
+  background: var(--background-modifier-hover);
+  border-color: var(--background-modifier-border-hover);
+}
+.enhanced-search-result-item.selected {
+  background: var(--background-modifier-active-hover);
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 1px var(--color-accent);
+}
+.enhanced-search-result-item .search-result-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+.enhanced-search-result-item .search-result-header .search-result-path {
+  font-weight: 500;
+  color: var(--text-normal);
+  font-size: 14px;
+  flex: 1;
+  min-width: 0;
+  /* Prevent path from expanding width - clip with ellipsis */
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.enhanced-search-result-item .search-result-header .search-result-path .path-folder {
+  color: var(--text-muted);
+}
+.enhanced-search-result-item .search-result-header .search-result-path .path-filename {
+  color: var(--text-normal);
+  font-weight: 600;
+}
+.enhanced-search-result-item .search-result-header .search-result-type {
+  background: var(--background-modifier-border);
+  color: var(--text-muted);
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.enhanced-search-result-item .search-result-snippet {
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.4;
+  margin: 4px 0;
+}
+.enhanced-search-result-item .search-result-snippet .snippet-highlight {
+  background: var(--text-selection);
+  color: var(--text-normal);
+  padding: 1px 2px;
+  border-radius: 2px;
+  font-weight: 500;
+}
+.enhanced-search-result-item .search-result-metadata {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 0;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+.enhanced-search-result-item .search-result-metadata .metadata-item {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.enhanced-search-result-item .search-result-metadata .metadata-separator {
+  color: var(--background-modifier-border);
+}
+.enhanced-search-result-item .search-result-scores {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  padding-top: 4px;
+  border-top: 1px solid var(--background-modifier-border);
+}
+.enhanced-search-result-item .search-result-scores.hidden {
+  display: none;
+}
+.enhanced-search-result-item .search-result-scores .score-item {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  font-size: 10px;
+  color: var(--text-faint);
+}
+.enhanced-search-result-item .search-result-scores .score-item .score-label {
+  font-weight: 500;
+}
+.enhanced-search-result-item .search-result-scores .score-item .score-bar {
+  width: 30px;
+  height: 3px;
+  background: var(--background-modifier-border);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.enhanced-search-result-item .search-result-scores .score-item .score-bar .score-fill {
+  height: 100%;
+  background: var(--color-accent);
+  transition: width 0.3s ease;
+}
+.enhanced-search-result-item .search-result-scores .score-item .score-value {
+  min-width: 20px;
+  text-align: right;
+}
+.enhanced-search-result-item .search-result-scores .combined-score {
+  margin-left: auto;
+  font-weight: 600;
+  color: var(--text-normal);
+}
+
+/* Enhanced Search Settings */
+.enhanced-search-settings .setting-item {
+  border-bottom: 1px solid var(--background-modifier-border);
+  padding: 16px 0;
+}
+.enhanced-search-settings .setting-item:last-child {
+  border-bottom: none;
+}
+.enhanced-search-settings .settings-section {
+  margin-bottom: 24px;
+}
+.enhanced-search-settings .settings-section .section-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-normal);
+  margin-bottom: 12px;
+  border-bottom: 2px solid var(--color-accent);
+  padding-bottom: 4px;
+}
+.enhanced-search-settings .settings-section .section-description {
+  color: var(--text-muted);
+  font-size: 13px;
+  margin-bottom: 16px;
+  line-height: 1.4;
+}
+.enhanced-search-settings .weight-slider .slider-container {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 8px;
+}
+.enhanced-search-settings .weight-slider .slider-container input[type=range] {
+  flex: 1;
+}
+.enhanced-search-settings .weight-slider .slider-container .weight-value {
+  min-width: 40px;
+  text-align: center;
+  font-weight: 500;
+  color: var(--text-normal);
+}
+.enhanced-search-settings .performance-stats {
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  padding: 12px;
+  margin-top: 12px;
+}
+.enhanced-search-settings .performance-stats .stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 12px;
+}
+.enhanced-search-settings .performance-stats .stat-item {
+  text-align: center;
+}
+.enhanced-search-settings .performance-stats .stat-item .stat-value {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--color-accent);
+  display: block;
+}
+.enhanced-search-settings .performance-stats .stat-item .stat-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+/* Semantic Search Modal - Uses Same Styles as File Search */
+.better-command-palette[palette-mode=semantic-search] {
+  /* Inherit all the main palette styles by not overriding them */
+  /* Only add semantic-search specific elements */
+}
+.better-command-palette[palette-mode=semantic-search] .prompt-input::placeholder {
+  color: var(--text-faint);
+}
+.better-command-palette[palette-mode=semantic-search] {
+  /* Enhanced intro section */
+}
+.better-command-palette[palette-mode=semantic-search] .semantic-search-intro {
+  padding: 32px 24px;
+  text-align: center;
+  border-bottom: 1px solid var(--background-modifier-border);
+  background: var(--background-primary-alt);
+  margin-bottom: 12px;
+  border-radius: var(--bcp-border-radius);
+}
+.better-command-palette[palette-mode=semantic-search] .semantic-search-intro .intro-title {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text-accent);
+  margin-bottom: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+.better-command-palette[palette-mode=semantic-search] .semantic-search-intro .intro-title::before {
+  content: "🔍";
+  font-size: 20px;
+}
+.better-command-palette[palette-mode=semantic-search] .semantic-search-intro .intro-description {
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.better-command-palette[palette-mode=semantic-search] .semantic-search-intro .intro-description p {
+  margin: 0 0 8px 0;
+}
+.better-command-palette[palette-mode=semantic-search] .semantic-search-intro .intro-description p:last-child {
+  margin-bottom: 0;
+}
+.better-command-palette[palette-mode=semantic-search] .semantic-search-intro .intro-description p strong {
+  color: var(--text-normal);
+  font-weight: 600;
+}
+.better-command-palette[palette-mode=semantic-search] {
+  /* Empty state message */
+}
+.better-command-palette[palette-mode=semantic-search] .suggestion-empty {
+  padding: 40px 20px;
+  text-align: center;
+  color: var(--text-faint);
+  font-style: italic;
+  transition: color var(--bcp-transition-speed) ease;
+}
+.better-command-palette[palette-mode=semantic-search] {
+  /* Instructions */
+}
+.better-command-palette[palette-mode=semantic-search] .prompt-instructions {
+  border-top: 1px solid var(--background-modifier-border);
+  padding: 8px 16px;
+}
+.better-command-palette[palette-mode=semantic-search] .prompt-instructions .prompt-instruction {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.better-command-palette[palette-mode=semantic-search] .prompt-instructions .prompt-instruction .prompt-instruction-command {
+  background: var(--background-modifier-border);
+  padding: 1px 4px;
+  border-radius: 2px;
+  font-family: var(--font-monospace);
+  font-size: 11px;
+}
+
+/* Hybrid Search Modal Styles */
+.better-command-palette[palette-mode=hybrid] {
+  /* Inherit all the main palette styles */
+}
+.better-command-palette[palette-mode=hybrid] .prompt-input::placeholder {
+  color: var(--text-faint);
+}
+.better-command-palette[palette-mode=hybrid] {
+  /* Hide default ignore button (flair) */
+}
+.better-command-palette[palette-mode=hybrid] .suggestion-flair {
+  display: none !important;
+}
+.better-command-palette[palette-mode=hybrid] {
+  /* New Clean Layout Styles */
+}
+.better-command-palette[palette-mode=hybrid] .hybrid-suggestion-content {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+  padding: 4px 2px;
+}
+.better-command-palette[palette-mode=hybrid] {
+  /* Row 1: Header */
+}
+.better-command-palette[palette-mode=hybrid] .hybrid-result-header {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  gap: 8px;
+}
+.better-command-palette[palette-mode=hybrid] .hybrid-result-title {
+  font-weight: 600;
+  color: var(--text-accent);
+  /* Purple/Accent Color */
+  border-bottom: 2px solid var(--text-accent);
+  /* Underline style */
+  font-size: 15px;
+  line-height: 1.3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding-bottom: 1px;
+}
+.better-command-palette[palette-mode=hybrid] .hybrid-header-spacer {
+  flex: 1;
+}
+.better-command-palette[palette-mode=hybrid] .hybrid-result-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  margin-left: auto;
+  /* Push to right without spacer div if needed, but we have spacer */
+}
+.better-command-palette[palette-mode=hybrid] .hybrid-rating {
+  display: flex;
+  align-items: center;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+.better-command-palette[palette-mode=hybrid] .hybrid-rating-stars {
+  color: #e6b422;
+  /* Gold color */
+  margin-right: 4px;
+  font-size: 11px;
+}
+.better-command-palette[palette-mode=hybrid] .hybrid-rating-text {
+  opacity: 0.8;
+}
+.better-command-palette[palette-mode=hybrid] {
+  /* Path Row */
+}
+.better-command-palette[palette-mode=hybrid] .hybrid-result-path {
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.3;
+}
+.better-command-palette[palette-mode=hybrid] .hybrid-menu-icon {
+  color: var(--text-muted);
+  opacity: 0.7;
+  display: flex;
+  align-items: center;
+}
+.better-command-palette[palette-mode=hybrid] .hybrid-menu-icon svg {
+  width: 16px;
+  height: 16px;
+}
+.better-command-palette[palette-mode=hybrid] {
+  /* Confidence Meter */
+}
+.better-command-palette[palette-mode=hybrid] .hybrid-confidence-meter {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-right: 4px;
+}
+.better-command-palette[palette-mode=hybrid] .hybrid-confidence-meter .meter-bar {
+  width: 3px;
+  height: 8px;
+  border-radius: 1px;
+  background-color: var(--background-modifier-border);
+  transition: all 0.2s ease;
+}
+.better-command-palette[palette-mode=hybrid] .hybrid-confidence-meter .meter-bar.filled {
+  background-color: var(--color-accent);
+}
+.better-command-palette[palette-mode=hybrid] {
+  /* Row 2: Body (Date + Snippet) */
+}
+.better-command-palette[palette-mode=hybrid] .hybrid-result-body {
+  display: flex;
+  align-items: baseline;
+  /* Align text baselines */
+  gap: 8px;
+  width: 100%;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+.better-command-palette[palette-mode=hybrid] {
+  /* Date Pill */
+}
+.better-command-palette[palette-mode=hybrid] .hybrid-date-pill {
+  background-color: var(--background-modifier-border);
+  color: var(--text-normal);
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  flex-shrink: 0;
+  font-family: var(--font-monospace);
+}
+.better-command-palette[palette-mode=hybrid] {
+  /* Excerpt/Snippet */
+}
+.better-command-palette[palette-mode=hybrid] .hybrid-excerpt {
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1;
+}
+.better-command-palette[palette-mode=hybrid] .hybrid-excerpt .hybrid-highlight {
+  color: var(--text-normal);
+  font-weight: 500;
+  background: rgba(var(--color-accent-rgb), 0.15);
+  padding: 0 2px;
+  border-radius: 2px;
+}
+.better-command-palette[palette-mode=hybrid] .hybrid-excerpt-more {
+  opacity: 0.7;
+  font-size: 0.9em;
+}
+.better-command-palette[palette-mode=hybrid] .hybrid-tag {
+  color: var(--text-muted);
+  font-size: 12px;
+  background: var(--background-primary);
+  padding: 1px 5px;
+  border-radius: 8px;
+  border: 1px solid var(--background-modifier-border);
+}
+.better-command-palette[palette-mode=hybrid] {
+  /* Interaction refinements */
+}
+.better-command-palette[palette-mode=hybrid] .suggestion-item.is-selected {
+  /* Keep accent colors for selected items */
+  background-color: var(--background-modifier-hover);
+}
+
+/* Settings Panel Styles */
+.settings-header {
+  margin-bottom: 2rem;
+  padding: 1.5rem;
+  background: var(--background-primary-alt);
+  border-radius: 8px;
+  border: 1px solid var(--background-modifier-border);
+}
+.settings-header .settings-title {
+  margin: 0 0 0.5rem 0;
+  color: var(--text-accent);
+  font-size: 1.5rem;
+  font-weight: 600;
+}
+.settings-header .settings-subtitle {
+  margin: 0 0 1rem 0;
+  color: var(--text-muted);
+  font-size: 0.9rem;
+  line-height: 1.4;
+}
+.settings-header .settings-stats {
+  display: flex;
+  gap: 1rem;
+  margin-top: 1rem;
+}
+.settings-header .settings-stats .stat-item {
+  background: var(--background-secondary);
+  padding: 0.25rem 0.75rem;
+  border-radius: 12px;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  border: 1px solid var(--background-modifier-border);
+}
+
+.settings-section-container {
+  margin-bottom: 1.5rem;
+  background: var(--background-primary);
+  border-radius: 8px;
+  border: 1px solid var(--background-modifier-border);
+  overflow: hidden;
+}
+.settings-section-container .settings-section-header {
+  padding: 1rem 1.5rem;
+  background: var(--background-primary-alt);
+  border-bottom: 1px solid var(--background-modifier-border);
+  cursor: pointer;
+  transition: background-color 0.2s ease;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.settings-section-container .settings-section-header:hover {
+  background: var(--background-modifier-hover);
+}
+.settings-section-container .settings-section-header .settings-section-title {
+  margin: 0;
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--text-normal);
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.settings-section-container .settings-section-header .settings-section-description {
+  margin: 0.25rem 0 0 0;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  line-height: 1.3;
+}
+.settings-section-container .settings-section-header .settings-section-toggle {
+  color: var(--text-muted);
+  transition: transform 0.2s ease;
+}
+.settings-section-container .settings-section-header .settings-section-toggle.collapsed {
+  transform: rotate(-90deg);
+}
+.settings-section-container .settings-section-content {
+  padding: 1.5rem;
+  transition: all 0.3s ease;
+  max-height: none;
+  overflow: visible;
+}
+.settings-section-container .settings-section-content.collapsed {
+  max-height: 0;
+  padding: 0 1.5rem;
+  overflow: hidden;
+}
+
+.settings-group {
+  margin-bottom: 2rem;
+}
+.settings-group:last-child {
+  margin-bottom: 0;
+}
+.settings-group .settings-group-title {
+  margin: 0 0 1rem 0;
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--text-accent);
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.settings-info {
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  padding: 1rem;
+  margin: 1rem 0;
+}
+.settings-info p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.9rem;
+  line-height: 1.4;
+}
+
+.settings-empty {
+  background: var(--background-secondary);
+  border: 1px dashed var(--background-modifier-border);
+  border-radius: 6px;
+  padding: 2rem;
+  margin: 1rem 0;
+  text-align: center;
+}
+.settings-empty p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.9rem;
+  line-height: 1.4;
+}
+
+/* Macro Styles */
+.macro-container {
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  margin: 1rem 0;
+  overflow: hidden;
+}
+.macro-container .macro-details {
+  padding: 1rem;
+  border-top: 1px solid var(--background-modifier-border);
+}
+.macro-container .macro-commands {
+  margin-top: 1rem;
+}
+.macro-container .macro-commands .macro-commands-title {
+  margin: 0 0 0.75rem 0;
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--text-normal);
+}
+.macro-container .macro-command-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.5rem 0.75rem;
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+  margin-bottom: 0.5rem;
+}
+.macro-container .macro-command-item:last-child {
+  margin-bottom: 0;
+}
+.macro-container .macro-command-item .macro-command-name {
+  font-size: 0.85rem;
+  color: var(--text-normal);
+  flex: 1;
+}
+.macro-container .macro-command-item .macro-command-remove {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 0.25rem;
+  border-radius: 3px;
+  transition: all 0.2s ease;
+}
+.macro-container .macro-command-item .macro-command-remove:hover {
+  background: var(--background-modifier-error);
+  color: var(--text-error);
+}
+
+/* Enhanced macro setting styles */
+.macro-setting {
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  margin: 1rem 0;
+}
+.macro-setting .setting-item-name {
+  font-weight: 600;
+  color: var(--text-normal);
+}
+.macro-setting .setting-item-description {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+.macro-setting .macro-main-settings {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 1fr 120px;
+  gap: 1rem;
+  border-top: 1px solid var(--background-modifier-border);
+  margin-top: 1rem;
+  padding-top: 1rem;
+}
+.macro-setting .macro-main-settings label {
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: var(--text-normal);
+  margin-bottom: 0.25rem;
+  display: block;
+}
+.macro-setting .macro-main-settings input {
+  width: 100%;
+  padding: 0.5rem;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+  background: var(--background-primary);
+  color: var(--text-normal);
+  font-size: 0.85rem;
+}
+.macro-setting .macro-main-settings input:focus {
+  outline: none;
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 1px var(--color-accent);
+}
+.macro-setting .macro-main-settings button {
+  padding: 0.5rem 1rem;
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.85rem;
+  transition: background-color 0.2s ease;
+}
+.macro-setting .macro-main-settings button:hover {
+  background: var(--interactive-accent-hover);
+}
+.macro-setting .macro-command {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 0.5rem 0.75rem;
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+  margin: 0.5rem 0;
+}
+.macro-setting .macro-command .command {
+  font-size: 0.85rem;
+  color: var(--text-normal);
+  margin: 0;
+  flex: 1;
+}
+.macro-setting .macro-command button {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 0.25rem;
+  border-radius: 3px;
+  transition: all 0.2s ease;
+  margin-left: 1rem;
+}
+.macro-setting .macro-command button:hover {
+  background: var(--background-modifier-error);
+  color: var(--text-error);
+}
+
+/* Button Improvements */
+.setting-item button {
+  transition: all 0.2s ease;
+}
+.setting-item button.mod-cta {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+}
+.setting-item button.mod-cta:hover {
+  background: var(--interactive-accent-hover);
+}
+.setting-item button.mod-warning {
+  background: var(--background-modifier-error);
+  color: var(--text-error);
+}
+.setting-item button.mod-warning:hover {
+  background: var(--text-error);
+  color: var(--text-on-accent);
+}
+
+/* Slider Improvements */
+.setting-item .slider {
+  margin: 0.5rem 0;
+}
+
+/* Text Input Improvements */
+.setting-item input[type=text],
+.setting-item textarea {
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+.setting-item input[type=text]:focus,
+.setting-item textarea:focus {
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 1px var(--color-accent);
+}
+
+.setting-item textarea {
+  min-height: 80px;
+  resize: vertical;
+  font-family: var(--font-monospace);
+  font-size: 0.85rem;
+}
+
+/* Toggle Improvements */
+.setting-item .checkbox-container {
+  display: flex;
+  align-items: center;
+}
+
+/* Responsive Design */
+@media (max-width: 768px) {
+  .settings-header {
+    padding: 1rem;
+  }
+  .settings-header .settings-title {
+    font-size: 1.25rem;
+  }
+  .settings-header .settings-stats {
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+  .settings-header .settings-stats .stat-item {
+    text-align: center;
+  }
+  .settings-section-content {
+    padding: 1rem;
+  }
+  .settings-section-content.collapsed {
+    padding: 0 1rem;
+  }
+  .macro-main-settings {
+    grid-template-columns: 1fr !important;
+    gap: 0.75rem;
+  }
+}
+/* Quick Link Modal Styles - Now uses same styles as file search */
+.quick-link-modal {
+  /* Inherits all file search modal styles - no custom styling needed */
+}
+
+/* Animation for Quick Link creation */
+@keyframes quickLinkCreated {
+  0% {
+    background: rgba(var(--color-accent-rgb), 0.2);
+    transform: scale(1.02);
+  }
+  100% {
+    background: transparent;
+    transform: scale(1);
+  }
+}
+.quick-link-created {
+  animation: quickLinkCreated 0.3s ease;
+}
+
+/* ============================================
+   Collapsible Setting Group Styles
+   Uses Obsidian's SettingGroup internally
+   ============================================ */
+.bcp-collapsible-group {
+  margin-bottom: 12px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-m);
+  overflow: hidden;
+  background: var(--background-primary);
+  transition: border-color 0.2s ease;
+}
+.bcp-collapsible-group:hover {
+  border-color: var(--background-modifier-border-hover);
+}
+
+.bcp-collapsible-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  background: var(--background-secondary);
+  cursor: pointer;
+  user-select: none;
+  transition: background-color 0.15s ease;
+}
+.bcp-collapsible-header:hover {
+  background: var(--background-secondary-alt);
+}
+.bcp-collapsible-header:active {
+  background: var(--background-modifier-hover);
+}
+
+.bcp-collapsible-title-group {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-weight: var(--font-semibold);
+  color: var(--text-normal);
+}
+
+.bcp-collapsible-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-accent);
+  opacity: 0.9;
+}
+.bcp-collapsible-icon svg {
+  width: 18px;
+  height: 18px;
+}
+
+.bcp-collapsible-title {
+  font-size: 14px;
+  letter-spacing: 0.01em;
+}
+
+.bcp-collapsible-chevron {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  transition: transform 0.2s ease, color 0.15s ease;
+}
+.bcp-collapsible-chevron svg {
+  width: 16px;
+  height: 16px;
+}
+
+.bcp-collapsible-content {
+  padding: 0;
+  border-top: 1px solid var(--background-modifier-border);
+  /* Style the inner SettingGroup from Obsidian */
+}
+.bcp-collapsible-content .setting-group {
+  padding: 12px 16px;
+}
+.bcp-collapsible-content {
+  /* Ensure settings inside have proper spacing */
+}
+.bcp-collapsible-content .setting-item {
+  padding: 12px 0;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+.bcp-collapsible-content .setting-item:first-child {
+  padding-top: 4px;
+}
+.bcp-collapsible-content .setting-item:last-child {
+  border-bottom: none;
+  padding-bottom: 4px;
+}
+.bcp-collapsible-content {
+  /* Style subheadings within groups */
+}
+.bcp-collapsible-content .setting-item.mod-heading {
+  margin-top: 8px;
+  padding-top: 16px;
+  border-top: 1px solid var(--background-modifier-border);
+}
+.bcp-collapsible-content .setting-item.mod-heading:first-child {
+  margin-top: 0;
+  border-top: none;
+}
+.bcp-collapsible-content .setting-item.mod-heading .setting-item-name {
+  font-size: 13px;
+  font-weight: var(--font-semibold);
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+/* Settings container styles */
+.bcp-settings-container {
+  max-width: 900px;
+  margin: 0 auto;
+}
+
+.bcp-settings-header-container {
+  margin-bottom: 20px;
+}
+.bcp-settings-header-container .setting-item {
+  border: none;
+  padding-bottom: 0;
+}
+.bcp-settings-header-container .setting-item-info .setting-item-name {
+  font-size: 20px;
+  font-weight: var(--font-bold);
+}
+
+.bcp-settings-global-controls {
+  display: flex;
+  gap: 12px;
+  font-size: 0.85em;
+  color: var(--text-muted);
+}
+.bcp-settings-global-controls .bcp-control-link {
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  transition: color 0.15s ease;
+}
+.bcp-settings-global-controls .bcp-control-link:hover {
+  color: var(--text-accent);
+}

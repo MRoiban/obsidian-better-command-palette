@@ -1,0 +1,11 @@
+{
+	"id": "obsidian-better-command-palette",
+	"name": "Better Command Palette",
+	"minAppVersion": "0.12.0",
+	"description": "A command palette that does all of the things you want it to do.",
+	"author": "MRoiban",
+	"authorUrl": "https://github.com/MRoiban",
+	"fundingUrl": "https://github.com/MRoiban/obsidian-better-command-palette",
+	"isDesktopOnly": false,
+	"version": "0.18.65"
+}
