@@ -97,6 +97,10 @@ export const DEFAULT_SETTINGS: BetterCommandPalettePluginSettings = {
         localCustomModelId: '',
         localDevice: 'auto',
         localDtype: 'auto',
+        localEmbeddingDimension: 0, // Full model dimension
+        enableReranker: false, // Opt-in: downloads a second (reranker) model
+        rerankerModel: 'mxbai-rerank-xsmall-v1',
+        rerankerTopK: 20,
         ollamaUrl: 'http://localhost:11434',
         embeddingModel: 'nomic-embed-text',
         searchThreshold: 0.3,

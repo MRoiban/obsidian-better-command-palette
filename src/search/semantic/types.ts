@@ -55,6 +55,11 @@ export interface SemanticSearchSettings {
     localCustomModelId: string; // Hugging Face model id used when localModel is 'custom'
     localDevice: LocalDeviceSetting; // 'auto' = WebGPU when an adapter is available, else WASM
     localDtype: LocalDtypeSetting; // ONNX weight precision; 'auto' = the model's default
+    localEmbeddingDimension: number; // Matryoshka truncation for local models that support it; 0 = full dimension
+    // Second-pass re-ranking with a local cross-encoder
+    enableReranker: boolean;
+    rerankerModel: string; // Reranker registry id
+    rerankerTopK: number; // Number of first-pass results re-scored by the reranker
     ollamaUrl: string;
     embeddingModel?: string; // Embedding model name in Ollama (e.g., nomic-embed-text, bge-m3)
     searchThreshold: number;
