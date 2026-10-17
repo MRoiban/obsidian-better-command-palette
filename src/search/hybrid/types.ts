@@ -4,8 +4,7 @@
  */
 
 import { TFile } from 'obsidian';
-import { EnhancedSearchResult, FileMetadata } from '../interfaces';
-import { SemanticSearchResult } from '../semantic/types';
+import { FileMetadata } from '../interfaces';
 
 /**
  * Source of a search result in hybrid search
@@ -38,6 +37,41 @@ export interface HybridMatchDetails {
 }
 
 /**
+ * Explainable score details for hybrid relevance.
+ */
+export interface HybridScoreBreakdown {
+    /** Rank-fusion score normalized to the active source set (0-1) */
+    normalizedFusionScore: number;
+    /** Weighted average of normalized keyword/semantic scores (0-1) */
+    rawScore: number;
+    /** How many active source weights this result matched (0-1) */
+    sourceCoverage: number;
+    /** Retrieval score before slower re-ranking signals (0-1) */
+    retrievalScore: number;
+    /** Weighted positive re-ranking score before bounce penalty (0-1) */
+    reRankSignalScore: number;
+    /** Negative behavioral penalty applied to the result (0-1) */
+    penaltyScore: number;
+    /** Explicit user feedback adjustment applied to ranking (-1 to 1 before weighting) */
+    feedbackScore: number;
+    /** Re-ranking contribution after penalties */
+    reRankBoost: number;
+    /** Final combined score after retrieval and re-ranking (0-1) */
+    finalScore: number;
+    /** Individual re-ranking signals used to compute the final score */
+    signals: {
+        title: number;
+        recency: number;
+        usage: number;
+        content: number;
+        pageRank: number;
+        proximity: number;
+        bounce: number;
+        feedback: number;
+    };
+}
+
+/**
  * Result from hybrid search combining keyword and semantic results
  */
 export interface HybridSearchResult {
@@ -61,6 +95,8 @@ export interface HybridSearchResult {
     fusionScore: number;
     /** Re-ranking adjustment applied */
     reRankBoost: number;
+    /** Optional explainable scoring details for debugging and tuning */
+    scoreBreakdown?: HybridScoreBreakdown;
 
     // Source tracking
     /** Which search system(s) returned this result */
@@ -69,6 +105,8 @@ export interface HybridSearchResult {
     keywordRank?: number;
     /** Rank in semantic results (undefined if not in semantic results) */
     semanticRank?: number;
+    /** Best semantic chunk index for this query, when semantic search supplied one */
+    semanticMatchedChunkIndex?: number;
 
     // Match details for UI
     matches: HybridMatchDetails;
@@ -158,6 +196,8 @@ export interface NormalizedSemanticResult {
     rank: number;
     similarity: number;
     excerpt: string;
+    matchedChunkIndex?: number;
+    matchedChunkText?: string;
     matches: {
         titleMatch: boolean;
         tagMatch: boolean;
@@ -186,7 +226,7 @@ export const DEFAULT_HYBRID_SEARCH_SETTINGS: HybridSearchSettings = {
     keywordWeight: 0.5,
     semanticWeight: 0.5,
     enableReRanking: true,
-    reRankPoolSize: 20,
+    reRankPoolSize: 15,
     reRankTitleWeight: 0.25,
     reRankRecencyWeight: 0.15,
     reRankUsageWeight: 0.15,

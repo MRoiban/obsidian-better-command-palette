@@ -662,16 +662,15 @@
 
     .hybrid-result-title {
         font-weight: 600;
-        color: var(--text-accent);
-        /* Purple/Accent Color */
-        border-bottom: 2px solid var(--text-accent);
-        /* Underline style */
+        color: var(--text-normal);
+        border-bottom: none;
+        text-decoration: none;
         font-size: 15px;
         line-height: 1.3;
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
-        padding-bottom: 1px;
+        padding-bottom: 0;
     }
 
     .hybrid-header-spacer {
@@ -936,6 +935,15 @@
         color: var(--text-muted);
         font-size: 0.9rem;
         line-height: 1.4;
+    }
+}
+
+/* Inline validation messages inside setting descriptions */
+.setting-item-description .mod-warning {
+    color: var(--text-error);
+
+    &:empty {
+        display: none;
     }
 }
 
@@ -1207,7 +1215,8 @@
 /* Quick Link Modal Styles - Now uses same styles as file search */
 
 .quick-link-modal {
-    /* Inherits all file search modal styles - no custom styling needed */
+    /* Uses the same suggestion-content, suggestion-aux, and suggestion-flair
+       structure/styles as the main file search modal. */
 }
 
 /* Animation for Quick Link creation */

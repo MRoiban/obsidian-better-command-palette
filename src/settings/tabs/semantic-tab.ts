@@ -1,60 +1,49 @@
 import { App, Setting, Notice } from 'obsidian';
 import BetterCommandPalettePlugin from 'src/main';
 import { BaseSettingsTab } from './base-tab';
+import { EmbeddingProviderSection } from './semantic/provider-section';
 
 export class SemanticTab implements BaseSettingsTab {
     id = 'semantic';
     title = 'Semantic';
     icon = 'brain-circuit';
 
+    private providerSection?: EmbeddingProviderSection;
+
     display(containerEl: HTMLElement, app: App, plugin: BetterCommandPalettePlugin): void {
+        // Own a root element so re-renders replace the tab content instead of appending to it
+        const rootEl = containerEl.createDiv();
+        this.providerSection = new EmbeddingProviderSection(plugin, () => this.render(rootEl, plugin));
+        this.render(rootEl, plugin);
+    }
+
+    private render(containerEl: HTMLElement, plugin: BetterCommandPalettePlugin): void {
+        containerEl.empty();
         const { settings } = plugin;
 
         new Setting(containerEl)
             .setName('Enable Semantic Search')
-            .setDesc('Activate AI-powered semantic search using Ollama embeddings')
+            .setDesc('Find notes by meaning using text embeddings. Runs a local model inside Obsidian by default; Ollama is optional.')
             .addToggle((toggle) => toggle
                 .setValue(settings.semanticSearch.enableSemanticSearch)
                 .onChange(async (value) => {
                     settings.semanticSearch.enableSemanticSearch = value;
                     await plugin.saveSettings();
                     // Refresh view to show/hide options
-                    this.display(containerEl, app, plugin);
+                    this.render(containerEl, plugin);
                 }));
 
         if (!settings.semanticSearch.enableSemanticSearch) {
             const infoEl = containerEl.createEl('div', { cls: 'settings-info' });
             infoEl.createEl('p', {
-                text: 'Semantic search requires Ollama to be installed and running. Enable this feature to configure advanced AI-powered search capabilities.',
+                text: 'Semantic search uses a small embedding model that runs inside Obsidian; it is downloaded once from Hugging Face on first use, no external server needed. An Ollama server can be used instead. Enable this feature to configure it.',
             });
             return;
         }
 
-        containerEl.createEl('h3', { text: 'Connection Settings' });
+        this.providerSection?.render(containerEl);
 
-        new Setting(containerEl)
-            .setName('Ollama URL')
-            .setDesc('URL of your Ollama server')
-            .addText((text) => text
-                .setPlaceholder('http://localhost:11434')
-                .setValue(settings.semanticSearch.ollamaUrl)
-                .onChange(async (value) => {
-                    settings.semanticSearch.ollamaUrl = value;
-                    await plugin.saveSettings();
-                }));
-
-        new Setting(containerEl)
-            .setName('Embedding Model')
-            .setDesc('Model to use for embeddings (e.g., nomic-embed-text, bge-m3)')
-            .addText((text) => text
-                .setPlaceholder('nomic-embed-text')
-                .setValue(settings.semanticSearch.embeddingModel || 'nomic-embed-text')
-                .onChange(async (value) => {
-                    settings.semanticSearch.embeddingModel = value.trim() || 'nomic-embed-text';
-                    await plugin.saveSettings();
-                }));
-
-        containerEl.createEl('h3', { text: 'Search Parameters' });
+        new Setting(containerEl).setName('Search Parameters').setHeading();
 
         new Setting(containerEl)
             .setName('Search Threshold')
@@ -63,9 +52,9 @@ export class SemanticTab implements BaseSettingsTab {
                 .setLimits(0.1, 0.9, 0.05)
                 .setValue(settings.semanticSearch.searchThreshold)
                 .setDynamicTooltip()
-                .onChange(async (value) => {
+                .onChange((value) => {
                     settings.semanticSearch.searchThreshold = value;
-                    await plugin.saveSettings();
+                    plugin.scheduleSettingsSave();
                 }));
 
         new Setting(containerEl)
@@ -75,12 +64,12 @@ export class SemanticTab implements BaseSettingsTab {
                 .setLimits(5, 50, 5)
                 .setValue(settings.semanticSearch.maxResults)
                 .setDynamicTooltip()
-                .onChange(async (value) => {
+                .onChange((value) => {
                     settings.semanticSearch.maxResults = value;
-                    await plugin.saveSettings();
+                    plugin.scheduleSettingsSave();
                 }));
 
-        containerEl.createEl('h3', { text: 'Performance' });
+        new Setting(containerEl).setName('Performance').setHeading();
 
         new Setting(containerEl)
             .setName('Chunk Size')
@@ -89,30 +78,88 @@ export class SemanticTab implements BaseSettingsTab {
                 .setLimits(500, 2000, 100)
                 .setValue(settings.semanticSearch.chunkSize)
                 .setDynamicTooltip()
-                .onChange(async (value) => {
+                .onChange((value) => {
                     settings.semanticSearch.chunkSize = value;
-                    await plugin.saveSettings();
+                    plugin.scheduleSettingsSave();
+                }));
+
+        new Setting(containerEl)
+            .setName('Max Indexed Files')
+            .setDesc('Maximum number of markdown files included in semantic indexing')
+            .addSlider((slider) => slider
+                .setLimits(100, 10000, 100)
+                .setValue(settings.semanticSearch.maxIndexedFiles)
+                .setDynamicTooltip()
+                .onChange((value) => {
+                    settings.semanticSearch.maxIndexedFiles = value;
+                    plugin.scheduleSettingsSave();
+                }));
+
+        new Setting(containerEl)
+            .setName('Max File Size')
+            .setDesc('Skip larger files during semantic indexing')
+            .addSlider((slider) => slider
+                .setLimits(64, 4096, 64)
+                .setValue(Math.round(settings.semanticSearch.maxFileSize / 1024))
+                .setDynamicTooltip()
+                .onChange((value) => {
+                    settings.semanticSearch.maxFileSize = value * 1024;
+                    plugin.scheduleSettingsSave();
+                }));
+
+        new Setting(containerEl)
+            .setName('Search Timeout')
+            .setDesc('Maximum time to wait for an interactive semantic query embedding')
+            .addSlider((slider) => slider
+                .setLimits(1000, 30000, 1000)
+                .setValue(settings.semanticSearch.searchTimeoutMs)
+                .setDynamicTooltip()
+                .onChange((value) => {
+                    settings.semanticSearch.searchTimeoutMs = value;
+                    plugin.scheduleSettingsSave();
+                }));
+
+        new Setting(containerEl)
+            .setName('Index Request Timeout')
+            .setDesc('Maximum time to wait for each document embedding request')
+            .addSlider((slider) => slider
+                .setLimits(5000, 120000, 5000)
+                .setValue(settings.semanticSearch.indexingRequestTimeoutMs)
+                .setDynamicTooltip()
+                .onChange((value) => {
+                    settings.semanticSearch.indexingRequestTimeoutMs = value;
+                    plugin.scheduleSettingsSave();
                 }));
 
         new Setting(containerEl)
             .setName('Max Concurrent Requests')
-            .setDesc('Maximum simultaneous requests to Ollama (1-10)')
+            .setDesc('Maximum simultaneous embedding requests to Ollama during indexing (1-10). The local model uses its own fixed limit.')
             .addSlider((slider) => slider
                 .setLimits(1, 10, 1)
                 .setValue(settings.semanticSearch.maxConcurrentRequests)
                 .setDynamicTooltip()
-                .onChange(async (value) => {
+                .onChange((value) => {
                     settings.semanticSearch.maxConcurrentRequests = value;
-                    await plugin.saveSettings();
+                    plugin.scheduleSettingsSave();
                 }));
 
         new Setting(containerEl)
             .setName('Adaptive Throttling')
-            .setDesc('Automatically adjust concurrency based on Ollama response times')
+            .setDesc('Automatically adjust concurrency based on Ollama response times (Ollama only)')
             .addToggle((toggle) => toggle
                 .setValue(settings.semanticSearch.enableAdaptiveThrottling ?? true)
                 .onChange(async (value) => {
                     settings.semanticSearch.enableAdaptiveThrottling = value;
+                    await plugin.saveSettings();
+                }));
+
+        new Setting(containerEl)
+            .setName('Auto-index on Startup')
+            .setDesc('Automatically build an empty semantic index after startup when the embedding model is available')
+            .addToggle((toggle) => toggle
+                .setValue(settings.semanticSearch.autoIndexOnStartup)
+                .onChange(async (value) => {
+                    settings.semanticSearch.autoIndexOnStartup = value;
                     await plugin.saveSettings();
                 }));
 
@@ -136,7 +183,7 @@ export class SemanticTab implements BaseSettingsTab {
                     await plugin.saveSettings();
                 }));
 
-        containerEl.createEl('h3', { text: 'Exclusions' });
+        new Setting(containerEl).setName('Exclusions').setHeading();
 
         new Setting(containerEl)
             .setName('Exclude Patterns')
@@ -146,16 +193,16 @@ export class SemanticTab implements BaseSettingsTab {
                 text.inputEl.cols = 40;
                 text.setPlaceholder('**/templates/**\n**/daily-notes/**')
                     .setValue(settings.semanticSearch.excludePatterns.join('\n'))
-                    .onChange(async (value) => {
+                    .onChange((value) => {
                         settings.semanticSearch.excludePatterns = value
                             .split('\n')
                             .map(p => p.trim())
                             .filter(p => p.length > 0);
-                        await plugin.saveSettings();
+                        plugin.scheduleSettingsSave();
                     });
             });
 
-        containerEl.createEl('h3', { text: 'Actions' });
+        new Setting(containerEl).setName('Actions').setHeading();
 
         new Setting(containerEl)
             .setName('Rebuild Semantic Index')

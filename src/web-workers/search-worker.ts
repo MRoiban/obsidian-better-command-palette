@@ -95,10 +95,11 @@ function sendResponse(type: WorkerResponse['type'], payload: any, requestId?: st
 
 // Handle errors
 self.onerror = (error) => {
+    const event = error as ErrorEvent;
     sendResponse('ERROR', {
-        message: error.message || 'Worker error',
-        filename: error.filename,
-        lineno: error.lineno,
+        message: event.message || 'Worker error',
+        filename: event.filename,
+        lineno: event.lineno,
     });
 };
 

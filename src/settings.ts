@@ -6,6 +6,7 @@ import { SearchSettings } from './search/interfaces';
 import { SemanticSearchSettings } from './search/semantic/types';
 import { HybridSearchSettings, DEFAULT_HYBRID_SEARCH_SETTINGS } from './search/hybrid/types';
 import { LinkGraphSettings, DEFAULT_LINK_GRAPH_SETTINGS } from './search/link-graph-service';
+import { DEFAULT_LOCAL_MODEL_ID } from './search/semantic/providers/model-registry';
 
 export interface BetterCommandPalettePluginSettings {
     closeWithBackspace: boolean,
@@ -90,12 +91,22 @@ export const DEFAULT_SETTINGS: BetterCommandPalettePluginSettings = {
         synonyms: [],
     },
     semanticSearch: {
-        enableSemanticSearch: false, // Disabled by default until user configures Ollama
+        enableSemanticSearch: false, // Opt-in: the local model is downloaded on first use
+        embeddingProvider: 'local', // In-plugin model; existing Ollama setups are kept on load (see mergeWithDefaults)
+        localModel: DEFAULT_LOCAL_MODEL_ID,
+        localCustomModelId: '',
+        localDevice: 'auto',
+        localDtype: 'auto',
         ollamaUrl: 'http://localhost:11434',
         embeddingModel: 'nomic-embed-text',
         searchThreshold: 0.3,
         maxResults: 10,
         chunkSize: 1000,
+        maxIndexedFiles: 2000,
+        maxFileSize: 512 * 1024,
+        searchTimeoutMs: 8000,
+        indexingRequestTimeoutMs: 30000,
+        autoIndexOnStartup: false,
         maxConcurrentRequests: 5, // Default concurrent requests (max 10)
         enableAdaptiveThrottling: true, // Smart throttling enabled by default
         cacheEnabled: true,

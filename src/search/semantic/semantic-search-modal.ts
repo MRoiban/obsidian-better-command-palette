@@ -22,14 +22,28 @@ interface SemanticMatch {
     };
 }
 
+/** Delay after the last keystroke before a query is embedded. */
+const SEARCH_DEBOUNCE_MS = 200;
+
 export class SemanticSearchModal extends SuggestModal<SemanticMatch> {
     plugin: BetterCommandPalettePlugin;
 
-    private isSearching = false;
-
     private currentResults: SemanticMatch[] = [];
 
-    private lastQuery = '';
+    /** Query whose results are in `currentResults`. */
+    private lastCompletedQuery = '';
+
+    /** Query that is debounced or currently being searched. */
+    private pendingQuery: string | null = null;
+
+    private searchDebounceTimer?: number;
+
+    /** Incremented per search; only the latest search may apply its results. */
+    private searchSequence = 0;
+
+    private searchAbortController?: AbortController;
+
+    private isClosed = false;
 
     constructor(app: App, plugin: BetterCommandPalettePlugin) {
         super(app);
@@ -64,25 +78,57 @@ export class SemanticSearchModal extends SuggestModal<SemanticMatch> {
 
     getSuggestions(query: string): SemanticMatch[] {
         if (!query || query.length < 3) {
+            // Drop any pending/in-flight search so its results cannot replace the defaults
+            this.cancelPendingSearch();
+            this.lastCompletedQuery = '';
             // Show helpful suggestions when no query provided
             return this.getDefaultSuggestions();
         }
 
-        // If same query and not searching, return cached results
-        if (query === this.lastQuery && !this.isSearching) {
+        // Results for this exact query are already shown
+        if (query === this.lastCompletedQuery) {
+            if (this.pendingQuery !== null) {
+                // User typed back to the completed query; the pending search is obsolete
+                this.cancelPendingSearch();
+            }
             return this.currentResults;
         }
 
-        // If already searching, return current results
-        if (this.isSearching) {
-            return this.currentResults;
-        }
+        this.scheduleSearch(query);
 
-        // Start async search
-        this.performAsyncSearch(query);
-
-        // Return current results (may be empty on first search)
+        // Keep showing the previous results until the new search completes
         return this.currentResults;
+    }
+
+    private scheduleSearch(query: string): void {
+        if (query === this.pendingQuery) {
+            // Already debounced or running for this query
+            return;
+        }
+
+        this.pendingQuery = query;
+        this.clearSearchDebounce();
+        this.searchDebounceTimer = window.setTimeout(() => {
+            this.searchDebounceTimer = undefined;
+            this.performAsyncSearch(query).catch((error) => {
+                logger.error('[SemanticSearch] Search error:', error);
+            });
+        }, SEARCH_DEBOUNCE_MS);
+    }
+
+    private clearSearchDebounce(): void {
+        if (this.searchDebounceTimer !== undefined) {
+            window.clearTimeout(this.searchDebounceTimer);
+            this.searchDebounceTimer = undefined;
+        }
+    }
+
+    private cancelPendingSearch(): void {
+        this.clearSearchDebounce();
+        this.searchSequence++;
+        this.searchAbortController?.abort();
+        this.searchAbortController = undefined;
+        this.pendingQuery = null;
     }
 
     /**
@@ -156,12 +202,16 @@ export class SemanticSearchModal extends SuggestModal<SemanticMatch> {
     }
 
     private async performAsyncSearch(query: string): Promise<void> {
-        if (this.isSearching) {
+        if (this.isClosed) {
             return;
         }
 
-        this.isSearching = true;
-        this.lastQuery = query;
+        // Newer search supersedes any in-flight one
+        const sequence = ++this.searchSequence;
+        this.searchAbortController?.abort();
+        const abortController = new AbortController();
+        this.searchAbortController = abortController;
+        const isLatest = () => !this.isClosed && sequence === this.searchSequence;
 
         try {
             logger.debug('[SemanticSearch] Starting search for:', query);
@@ -169,29 +219,41 @@ export class SemanticSearchModal extends SuggestModal<SemanticMatch> {
             if (!searchEngine) {
                 logger.warn('[SemanticSearch] Search engine not available');
                 new Notice('Semantic search not available');
+                // Mark as completed so the re-render below does not retry in a loop
+                this.currentResults = [];
+                this.lastCompletedQuery = query;
                 return;
             }
 
             const startTime = Date.now();
-            const results = await searchEngine.search(query);
-            const searchTime = Date.now() - startTime;
-
-            logger.debug(`[SemanticSearch] Found ${results.length} results`);
-
-            const matches = this.convertToMatches(results);
-            this.currentResults = matches;
-
-            // Trigger a re-render by simulating input change
-            if (this.inputEl && this.inputEl.value === query) {
-                // Dispatch an input event to trigger suggestions update
-                this.inputEl.dispatchEvent(new Event('input', { bubbles: true }));
+            const results = await searchEngine.search(query, { signal: abortController.signal });
+            if (!isLatest()) {
+                return;
             }
+
+            logger.debug(`[SemanticSearch] Found ${results.length} results in ${Date.now() - startTime}ms`);
+            this.currentResults = this.convertToMatches(results);
+            this.lastCompletedQuery = query;
         } catch (error) {
+            if (!isLatest() || (error instanceof Error && error.name === 'AbortError')) {
+                return;
+            }
             logger.error('[SemanticSearch] Search error:', error);
             new Notice(`Search error: ${error.message}`);
             this.currentResults = [];
+            this.lastCompletedQuery = query;
         } finally {
-            this.isSearching = false;
+            if (isLatest()) {
+                if (this.pendingQuery === query) {
+                    this.pendingQuery = null;
+                }
+                if (this.searchAbortController === abortController) {
+                    this.searchAbortController = undefined;
+                }
+                // Re-render with whatever is typed now: shows these results if the input still
+                // matches, otherwise schedules a search for the current input
+                this.inputEl?.dispatchEvent(new Event('input', { bubbles: true }));
+            }
         }
     }
 
@@ -449,6 +511,12 @@ export class SemanticSearchModal extends SuggestModal<SemanticMatch> {
     onOpen(): void {
         logger.debug('[SemanticSearch] Modal opened');
         super.onOpen();
+        this.isClosed = false;
+
+        // Load the local embedding model in the background so the first query is fast
+        this.plugin.getEmbeddingService()?.warmup().catch((error) => {
+            logger.debug('[SemanticSearch] Embedding model warmup failed', error);
+        });
 
         // Restore last query if preserve query is enabled
         if (this.plugin.settings.semanticSearch.preserveQuery && this.plugin.lastSemanticQuery) {
@@ -467,8 +535,9 @@ export class SemanticSearchModal extends SuggestModal<SemanticMatch> {
         }
 
         super.onClose();
+        this.isClosed = true;
+        this.cancelPendingSearch();
         this.currentResults = [];
-        this.isSearching = false;
-        this.lastQuery = '';
+        this.lastCompletedQuery = '';
     }
 }

@@ -4,11 +4,9 @@
  */
 
 import {
-    App, SuggestModal, setIcon, Notice, TFile, Editor, MarkdownView,
+    App, SuggestModal, setIcon, Notice, TFile, Editor, Keymap, Platform,
 } from 'obsidian';
 import BetterCommandPalettePlugin from '../main';
-import { Match } from '../types/types';
-import { PaletteMatch, createPaletteMatchesFromFilePath } from '../utils';
 import { logger } from '../utils/logger';
 
 interface QuickLinkMatch {
@@ -18,6 +16,18 @@ interface QuickLinkMatch {
     isUnresolved: boolean;
 }
 
+/** SuggestModal internals that exist at runtime but are not in the public typings */
+interface SuggestModalInternals {
+    updateSuggestions(): void;
+    chooser: {
+        useSelectedItem(evt: KeyboardEvent): void;
+    };
+}
+
+const SEARCH_DEBOUNCE_MS = 150;
+
+const MAX_RESULTS = 50;
+
 export class QuickLinkModal extends SuggestModal<QuickLinkMatch> {
     plugin: BetterCommandPalettePlugin;
 
@@ -26,8 +36,6 @@ export class QuickLinkModal extends SuggestModal<QuickLinkMatch> {
     private sourceFile: TFile;
 
     private editor: Editor;
-
-    private isSearching = false;
 
     private currentResults: QuickLinkMatch[] = [];
 
@@ -40,6 +48,13 @@ export class QuickLinkModal extends SuggestModal<QuickLinkMatch> {
     private hasPerformedInitialSearch = false; // Track if we've done the initial search with selected text
 
     private initialSearchResults: QuickLinkMatch[] = []; // Store the initial search results based on selected text
+
+    private ignoredSuggestionIds = new Set<string>();
+
+    /** Incremented for every new user query so stale async results are dropped */
+    private searchSequence = 0;
+
+    private searchDebounceTimer: number | null = null;
 
     constructor(
         app: App,
@@ -59,25 +74,35 @@ export class QuickLinkModal extends SuggestModal<QuickLinkMatch> {
         this.modalEl.addClass('quick-link-modal');
         this.modalEl.setAttribute('palette-mode', 'quick-link');
 
-        // Add search engine indicator
         const searchEngine = plugin.settings.quickLink.searchEngine;
-        const engineLabel = searchEngine === 'semantic' ? '🧠 Semantic' :
-            searchEngine === 'hybrid' ? '⚡ Hybrid' : '🔍 Enhanced';
         this.modalEl.setAttribute('search-engine', searchEngine);
 
-        // Set placeholder text with search engine indicator
-        this.setPlaceholder(`${engineLabel} | Showing results for "${this.truncateText(selectedText, 25)}" (or type to search)`);
+        this.setPlaceholder(`Showing results for "${this.truncateText(selectedText, 25)}" (or type to search)`);
 
         // Set instructions
         this.setInstructions([
             { command: '↑↓', purpose: 'Navigate' },
             { command: '↵', purpose: 'Create link' },
-            { command: 'Ctrl+↵', purpose: 'Create new file and link' },
+            { command: Platform.isMacOS ? '⌘↵' : 'Ctrl+↵', purpose: 'Create new file and link' },
             { command: 'esc', purpose: 'Cancel' },
         ]);
 
+        // SuggestModal only handles plain Enter; route Mod+Enter through the chooser
+        // so onChooseSuggestion receives the event and can create a new file
+        this.scope.register(['Mod'], 'Enter', (evt: KeyboardEvent) => {
+            (this as unknown as SuggestModalInternals).chooser.useSelectedItem(evt);
+            return false;
+        });
+
         // Initialize file list
         this.initializeFiles();
+    }
+
+    /**
+     * Re-render the list from the current state (after async results arrive)
+     */
+    private refreshSuggestions(): void {
+        (this as unknown as SuggestModalInternals).updateSuggestions();
     }
 
     /**
@@ -87,8 +112,7 @@ export class QuickLinkModal extends SuggestModal<QuickLinkMatch> {
         this.allFiles = [];
 
         try {
-            // Get all cached files
-            const cachedFiles = this.app.metadataCache.getCachedFiles();
+            const cachedFiles = this.app.vault.getFiles().map((file) => file.path);
 
             for (const filePath of cachedFiles) {
                 if (!filePath || typeof filePath !== 'string') continue;
@@ -159,18 +183,41 @@ export class QuickLinkModal extends SuggestModal<QuickLinkMatch> {
 
         // Handle empty query after initial load - show initial search results based on selected text
         if (!query || query.length === 0) {
+            // Drop any pending user search; its results are no longer relevant
+            this.cancelPendingSearch();
+            this.lastQuery = '';
             // If we have initial search results, show those; otherwise show recent files
             return this.initialSearchResults.length > 0 ? this.initialSearchResults : this.getRecentFiles();
         }
 
-        // If same query and not searching, return cached results
-        if (query === this.lastQuery && !this.isSearching) {
+        // Same query: return results (refreshed once the async search completes)
+        if (query === this.lastQuery) {
             return this.currentResults;
         }
 
-        // Perform search with user's query
-        this.performSearch(query);
+        // Debounced search with user's query; keep showing the previous results meanwhile
+        this.scheduleSearch(query);
         return this.currentResults;
+    }
+
+    private cancelPendingSearch(): void {
+        this.searchSequence += 1;
+
+        if (this.searchDebounceTimer !== null) {
+            window.clearTimeout(this.searchDebounceTimer);
+            this.searchDebounceTimer = null;
+        }
+    }
+
+    private scheduleSearch(query: string): void {
+        this.cancelPendingSearch();
+        this.lastQuery = query;
+
+        const sequence = this.searchSequence;
+        this.searchDebounceTimer = window.setTimeout(() => {
+            this.searchDebounceTimer = null;
+            this.performSearch(query, sequence);
+        }, SEARCH_DEBOUNCE_MS);
     }
 
     /**
@@ -185,13 +232,39 @@ export class QuickLinkModal extends SuggestModal<QuickLinkMatch> {
         const searchQuery = this.selectedText.trim();
         logger.debug('[QuickLink] Performing initial search with selected text:', searchQuery);
 
+        this.initialSearchResults = await this.findMatches(searchQuery);
+
+        // Only re-render if the initial results are what's on screen
+        if (this.inputEl && this.inputEl.value === '') {
+            this.refreshSuggestions();
+        }
+    }
+
+    /**
+     * Perform search through files using the configured search engine.
+     * Results are dropped if a newer query was issued in the meantime.
+     */
+    private async performSearch(query: string, sequence: number): Promise<void> {
+        const results = await this.findMatches(query);
+
+        if (sequence !== this.searchSequence) {
+            return;
+        }
+
+        this.currentResults = results;
+        this.refreshSuggestions();
+    }
+
+    /**
+     * Search with the configured engine, falling back to a simple name match
+     * when the engine fails or finds nothing.
+     */
+    private async findMatches(query: string): Promise<QuickLinkMatch[]> {
         try {
-            const results = await this.performEngineSearch(searchQuery, 50);
+            const results = await this.performEngineSearch(query, MAX_RESULTS);
 
             if (results.length > 0) {
-                this.isSearching = true;
-
-                const filteredResults = results
+                return this.filterIgnoredResults(results
                     .filter((result) => result.path !== this.sourceFile.path)
                     .map((result) => {
                         const file = this.app.vault.getAbstractFileByPath(result.path);
@@ -201,45 +274,20 @@ export class QuickLinkModal extends SuggestModal<QuickLinkMatch> {
                             file: file instanceof TFile ? file : null,
                             isUnresolved: false,
                         };
-                    });
-
-                // Store the initial search results separately
-                this.initialSearchResults = filteredResults;
-
-                // Update current results if we're still in initial load mode
-                if (this.isInitialLoad) {
-                    this.currentResults = filteredResults;
-                }
-
-                this.isSearching = false;
-
-                // Force UI update by triggering input event
-                if (this.inputEl && this.inputEl.value === '') {
-                    this.inputEl.dispatchEvent(new Event('input', { bubbles: true }));
-                }
-                return;
+                    }));
             }
         } catch (error) {
-            logger.warn('[QuickLink] Engine search failed in initial search, falling back to fuzzy search:', error);
-            this.isSearching = false;
+            logger.warn('[QuickLink] Engine search failed, falling back to fuzzy search:', error);
         }
 
-        // Fallback to fuzzy search
-        const lowerQuery = searchQuery.toLowerCase();
-        const fuzzyResults = this.allFiles
+        // Fallback to name matching
+        const lowerQuery = query.toLowerCase();
+        return this.filterIgnoredResults(this.allFiles
             .filter((item) => {
                 if (item.file?.path === this.sourceFile.path) return false;
                 return item.text.toLowerCase().includes(lowerQuery);
             })
-            .slice(0, 50);
-
-        // Store the initial search results separately
-        this.initialSearchResults = fuzzyResults;
-
-        // Update current results if we're still in initial load mode
-        if (this.isInitialLoad) {
-            this.currentResults = fuzzyResults;
-        }
+            .slice(0, MAX_RESULTS));
     }
 
     /**
@@ -251,46 +299,38 @@ export class QuickLinkModal extends SuggestModal<QuickLinkMatch> {
 
         logger.debug(`[QuickLink] Using search engine: ${searchEngine}`);
 
-        switch (searchEngine) {
-            case 'semantic': {
-                const semanticEngine = this.plugin.getSemanticSearchEngine();
-                if (semanticEngine) {
-                    const results = await semanticEngine.search(query);
-                    return results.slice(0, limit).map((r) => ({
-                        path: r.file.path,
-                        score: r.similarity,
-                    }));
-                }
-                logger.warn('[QuickLink] Semantic engine not available, falling back to enhanced');
-                // Fall through to enhanced
+        if (searchEngine === 'semantic') {
+            const semanticEngine = this.plugin.getSemanticSearchEngine();
+            if (semanticEngine) {
+                const results = await semanticEngine.search(query);
+                return results.slice(0, limit).map((r) => ({
+                    path: r.file.path,
+                    score: r.similarity,
+                }));
             }
-            // eslint-disable-next-line no-fallthrough
-            case 'hybrid': {
-                if (searchEngine === 'hybrid' && this.plugin.hybridSearchService?.isReady()) {
-                    const results = await this.plugin.hybridSearchService.search(query, { limit });
-                    return results.map((r) => ({
-                        path: r.path,
-                        score: r.finalScore,
-                    }));
-                }
-                if (searchEngine === 'hybrid') {
-                    logger.warn('[QuickLink] Hybrid engine not ready, falling back to enhanced');
-                }
-                // Fall through to enhanced
-            }
-            // eslint-disable-next-line no-fallthrough
-            case 'enhanced':
-            default: {
-                if (this.plugin.searchService) {
-                    const results = await this.plugin.searchService.search(query, limit);
-                    return results.map((r) => ({
-                        path: r.metadata.path,
-                        score: r.score,
-                    }));
-                }
-                return [];
-            }
+            logger.warn('[QuickLink] Semantic engine not available, falling back to enhanced');
         }
+
+        if (searchEngine === 'hybrid') {
+            if (this.plugin.hybridSearchService?.isReady()) {
+                const results = await this.plugin.hybridSearchService.search(query, { limit });
+                return results.map((r) => ({
+                    path: r.path,
+                    score: r.finalScore,
+                }));
+            }
+            logger.warn('[QuickLink] Hybrid engine not ready, falling back to enhanced');
+        }
+
+        if (this.plugin.searchService) {
+            const results = await this.plugin.searchService.search(query, limit);
+            return results.map((r) => ({
+                path: r.metadata.path,
+                score: r.score,
+            }));
+        }
+
+        return [];
     }
 
     /**
@@ -303,68 +343,38 @@ export class QuickLinkModal extends SuggestModal<QuickLinkMatch> {
         for (const path of recentPaths) {
             const file = this.app.vault.getAbstractFileByPath(path);
             if (file instanceof TFile && path !== this.sourceFile.path) {
-                suggestions.push({
+                const suggestion = {
                     id: file.path,
                     text: file.basename,
                     file,
                     isUnresolved: false,
-                });
+                };
+
+                if (!this.isIgnored(suggestion)) {
+                    suggestions.push(suggestion);
+                }
             }
         }
 
         return suggestions;
     }
 
-    /**
-   * Perform search through files using the configured search engine
-   */
-    private async performSearch(query: string): Promise<void> {
-        this.lastQuery = query;
-        const lowerQuery = query.toLowerCase();
-
-        try {
-            const results = await this.performEngineSearch(query, 50);
-
-            if (results.length > 0) {
-                this.isSearching = true;
-
-                this.currentResults = results
-                    .filter((result) => result.path !== this.sourceFile.path)
-                    .map((result) => {
-                        const file = this.app.vault.getAbstractFileByPath(result.path);
-                        return {
-                            id: result.path,
-                            text: file instanceof TFile ? file.basename : result.path,
-                            file: file instanceof TFile ? file : null,
-                            isUnresolved: false,
-                        };
-                    });
-
-                this.isSearching = false;
-
-                // Force UI update by triggering input event
-                if (this.inputEl && this.inputEl.value === query) {
-                    this.inputEl.dispatchEvent(new Event('input', { bubbles: true }));
-                }
-                return;
-            }
-        } catch (error) {
-            logger.warn('[QuickLink] Engine search failed, falling back to fuzzy search:', error);
-            this.isSearching = false;
-        }
-
-        // Fallback to fuzzy search
-        this.currentResults = this.allFiles
-            .filter((item) => {
-                if (item.file?.path === this.sourceFile.path) return false;
-                return item.text.toLowerCase().includes(lowerQuery);
-            })
-            .slice(0, 50);
-    }
-
     renderSuggestion(match: QuickLinkMatch, el: HTMLElement): void {
-        // Use the same rendering style as the enhanced file adapter
-        this.renderFileSearchStyle(match, el);
+        el.addClass('mod-complex');
+
+        const suggestionContent = el.createEl('span', 'suggestion-content');
+        const suggestionAux = el.createEl('span', 'suggestion-aux');
+        const flairContainer = suggestionAux.createEl('span', 'suggestion-flair');
+
+        setIcon(flairContainer, 'cross');
+        flairContainer.ariaLabel = 'Ignore suggestion';
+        flairContainer.onClickEvent((event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            this.ignoreSuggestion(match);
+        });
+
+        this.renderFileSearchStyle(match, suggestionContent);
     }
 
     /**
@@ -387,15 +397,6 @@ export class QuickLinkModal extends SuggestModal<QuickLinkMatch> {
         const suggestionEl = el.createEl('div', {
             cls: 'suggestion-title',
         });
-
-        // Add file type indicator
-        if (match.file) {
-            this.addFileTypeIndicator(suggestionEl, match.file.path);
-        } else {
-            // Unresolved link indicator
-            const indicator = suggestionEl.createDiv({ cls: 'file-type-indicator unresolved' });
-            setIcon(indicator, 'link');
-        }
 
         // Add recently accessed indicator if applicable
         if (match.file && this.isRecentlyAccessed(match)) {
@@ -432,44 +433,7 @@ export class QuickLinkModal extends SuggestModal<QuickLinkMatch> {
                 text: path,
             });
         }
-    }
 
-    /**
-   * Add file type indicator icon
-   */
-    private addFileTypeIndicator(container: HTMLElement, filePath: string): void {
-        const indicator = container.createDiv({ cls: 'file-type-indicator' });
-        const extension = this.getFileExtension(filePath);
-
-        let iconName = 'document';
-
-        switch (extension) {
-            case 'md':
-                iconName = 'document';
-                break;
-            case 'pdf':
-                iconName = 'file-text';
-                break;
-            case 'png':
-            case 'jpg':
-            case 'jpeg':
-            case 'gif':
-            case 'svg':
-                iconName = 'image';
-                break;
-            default:
-                iconName = 'file';
-        }
-
-        setIcon(indicator, iconName);
-    }
-
-    /**
-   * Get file extension from path
-   */
-    private getFileExtension(path: string): string | null {
-        const match = path.match(/\.([^.]+)$/);
-        return match ? match[1].toLowerCase() : null;
     }
 
     /**
@@ -514,13 +478,31 @@ export class QuickLinkModal extends SuggestModal<QuickLinkMatch> {
         return recentFiles.includes(match.file.path);
     }
 
+    private isIgnored(match: QuickLinkMatch): boolean {
+        return this.ignoredSuggestionIds.has(match.id);
+    }
+
+    private filterIgnoredResults(results: QuickLinkMatch[]): QuickLinkMatch[] {
+        return results.filter((result) => !this.isIgnored(result));
+    }
+
+    private ignoreSuggestion(match: QuickLinkMatch): void {
+        this.ignoredSuggestionIds.add(match.id);
+
+        this.allFiles = this.filterIgnoredResults(this.allFiles);
+        this.initialSearchResults = this.filterIgnoredResults(this.initialSearchResults);
+        this.currentResults = this.filterIgnoredResults(this.currentResults);
+        this.refreshSuggestions();
+    }
+
     /**
    * Handle suggestion selection - create the link
    */
     onChooseSuggestion(match: QuickLinkMatch | null, evt: MouseEvent | KeyboardEvent): void {
         if (!match) return;
 
-        const shouldCreateNewFile = evt && (evt as KeyboardEvent).ctrlKey;
+        // Ctrl on Windows/Linux, Cmd on macOS
+        const shouldCreateNewFile = !!evt && !!Keymap.isModEvent(evt);
 
         if (shouldCreateNewFile && match.isUnresolved) {
             this.createNewFileAndLink(match.text);
@@ -610,21 +592,13 @@ export class QuickLinkModal extends SuggestModal<QuickLinkMatch> {
         return `${text.substring(0, maxLength)}...`;
     }
 
-    /**
-   * Escape HTML for safe display
-   */
-    private escapeHtml(text: string): string {
-        const div = document.createElement('div');
-        div.textContent = text;
-        return div.innerHTML;
-    }
-
     onOpen(): void {
         super.onOpen();
         logger.debug('[QuickLink] Modal opened for selected text:', this.selectedText);
     }
 
     onClose(): void {
+        this.cancelPendingSearch();
         super.onClose();
         logger.debug('[QuickLink] Modal closed');
     }

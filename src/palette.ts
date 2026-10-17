@@ -3,7 +3,12 @@ import {
     generateHotKeyText,
     OrderedSet, PaletteMatch, renderPrevItems, SuggestModalAdapter,
 } from 'src/utils';
-import { Match, UnsafeSuggestModalInterface } from 'src/types/types';
+import {
+    Match,
+    SuggestionsWorkerResultMessage,
+    UnsafeSuggestModalInterface,
+    WorkerMode,
+} from 'src/types/types';
 import {
     BetterCommandPaletteCommandAdapter,
     BetterCommandPaletteFileAdapter,
@@ -14,8 +19,26 @@ import HybridSearchAdapter from 'src/palette-modal-adapters/hybrid-adapter';
 import BetterCommandPalettePlugin from 'src/main';
 import { EnhancedSearchService } from 'src/search/enhanced-search-service';
 import { HybridSearchService } from 'src/search/hybrid/hybrid-search-service';
+import { FileMatchCacheService } from 'src/search/file-match-cache-service';
 import { ActionType } from './utils/constants';
 import { logger } from './utils/logger';
+
+/**
+ * Obsidian's chooser exposes the rendered values and the selected index at runtime,
+ * but they are not part of the public typings.
+ */
+type SelectableChooser = UnsafeSuggestModalInterface['chooser'] & {
+    values?: Match[] | null;
+    selectedItem?: number;
+    setSelectedItem?: (index: number, scrollIntoView?: boolean) => void;
+};
+
+/**
+ * The suggestions worker is shared by every palette instance, so request ids must be
+ * unique across instances. Otherwise a late reply addressed to a closed modal could
+ * match the active request id of a newly opened one.
+ */
+let nextWorkerRequestId = 0;
 
 class BetterCommandPaletteModal extends SuggestModal<Match> implements UnsafeSuggestModalInterface {
     // Unsafe interface
@@ -61,9 +84,29 @@ class BetterCommandPaletteModal extends SuggestModal<Match> implements UnsafeSug
 
     currentSearchAbortController?: AbortController;
 
+    /**
+     * Mode used when the input has no prefix. Only acts as a default until the user
+     * changes mode (hotkey or typed prefix), after which it is cleared.
+     */
     initialMode?: ActionType;
 
-    suppressNextSearchUpdate = false;
+    private registeredWorkerCorpusVersions = new Map<WorkerMode, number>();
+
+    /** Id of the worker request whose reply we are waiting for (0 = none). */
+    private activeWorkerRequestId = 0;
+
+    /** Incremented for every new query so stale async search results can be dropped. */
+    private searchSequence = 0;
+
+    private searchDebounceTimer: number | null = null;
+
+    /** Forces the next getSuggestions call to search even if the query is unchanged. */
+    private forceNextSearch = false;
+
+    /** True once onOpen has applied the initial input value for the current open. */
+    private initialInputApplied = false;
+
+    private readonly handleWorkerMessage = (msg: MessageEvent) => this.receivedSuggestions(msg);
 
     constructor(
         app: App,
@@ -75,6 +118,7 @@ class BetterCommandPaletteModal extends SuggestModal<Match> implements UnsafeSug
         hybridSearchService?: HybridSearchService,
         initialInputValue = '',
         initialMode?: ActionType,
+        fileMatchCache?: FileMatchCacheService,
     ) {
         super(app);
 
@@ -108,6 +152,7 @@ class BetterCommandPaletteModal extends SuggestModal<Match> implements UnsafeSug
             plugin,
             this,
             searchService,
+            fileMatchCache,
         );
 
         this.tagAdapter = new BetterCommandPaletteTagAdapter(
@@ -126,9 +171,9 @@ class BetterCommandPaletteModal extends SuggestModal<Match> implements UnsafeSug
             hybridSearchService,
         );
 
-        // Lets us do the suggestion fuzzy search in a different thread
+        // Lets us do the suggestion fuzzy search in a different thread.
+        // The message handler is attached in onOpen because close() detaches it.
         this.suggestionsWorker = suggestionsWorker;
-        this.suggestionsWorker.onmessage = (msg: MessageEvent) => this.receivedSuggestions(msg);
 
         // Add our custom title element
         this.modalTitleEl = createEl('p', {
@@ -172,7 +217,12 @@ class BetterCommandPaletteModal extends SuggestModal<Match> implements UnsafeSug
             evt.preventDefault();
         }
 
-        this.cancelEnhancedSearch();
+        this.cancelPendingSearch();
+
+        // Only detach our own handler; another palette instance may own the worker now
+        if (this.suggestionsWorker.onmessage === this.handleWorkerMessage) {
+            this.suggestionsWorker.onmessage = null;
+        }
     }
 
     setScopes(plugin: BetterCommandPalettePlugin) {
@@ -210,19 +260,16 @@ class BetterCommandPaletteModal extends SuggestModal<Match> implements UnsafeSug
         });
 
         this.scope.register([openInNewTabMod], 'Enter', (event: KeyboardEvent) => {
-            if (this.actionType === ActionType.Files && this.currentSuggestions.length) {
-                const promptResults = document.querySelector('.better-command-palette .prompt-results');
-                const selected = document.querySelector('.better-command-palette .is-selected');
+            if (this.actionType !== ActionType.Files && this.actionType !== ActionType.Hybrid) {
+                return;
+            }
 
-                // Add null checks to prevent runtime errors
-                if (promptResults && selected) {
-                    const selectedIndex = Array.from(promptResults.children).indexOf(selected);
-                    if (selectedIndex >= 0 && selectedIndex < this.currentSuggestions.length) {
-                        const selectedMatch = this.currentSuggestions[selectedIndex] || null;
-                        this.currentAdapter.onChooseSuggestion(selectedMatch, event);
-                        this.close(event);
-                    }
-                }
+            // Use the chooser's own selection: the rendered list can differ from
+            // currentSuggestions (e.g. hidden items are filtered out)
+            const selectedMatch = this.getSelectedMatch();
+            if (selectedMatch) {
+                this.currentAdapter.onChooseSuggestion(selectedMatch, event);
+                this.close(event);
             }
         });
 
@@ -234,7 +281,20 @@ class BetterCommandPaletteModal extends SuggestModal<Match> implements UnsafeSug
         this.updateSuggestions();
     };
 
+    private getSelectedMatch(): Match | null {
+        const chooser = this.chooser as SelectableChooser;
+        const index = chooser.selectedItem ?? -1;
+        return chooser.values?.[index] ?? null;
+    }
+
     onOpen() {
+        // The modal can be reopened (e.g. from the tag adapter), so reset per-open state
+        this.initialInputApplied = false;
+        this.forceNextSearch = true;
+        // Another palette instance may have registered a different corpus in the shared worker
+        this.registeredWorkerCorpusVersions.clear();
+        this.suggestionsWorker.onmessage = this.handleWorkerMessage;
+
         super.onOpen();
 
         // Record modal open for pogo-sticking detection
@@ -267,9 +327,14 @@ class BetterCommandPaletteModal extends SuggestModal<Match> implements UnsafeSug
             // 4. Force an immediate suggestion update with correct adapter
             this.updateSuggestions();
         }
+
+        this.initialInputApplied = true;
     }
 
     changeActionType(actionType: ActionType) {
+        // An explicit mode change ends the initial (hotkey) mode default
+        this.initialMode = undefined;
+
         let prefix = '';
         if (actionType === ActionType.Files) {
             prefix = this.plugin.settings.fileSearchPrefix;
@@ -310,46 +375,43 @@ class BetterCommandPaletteModal extends SuggestModal<Match> implements UnsafeSug
         this.updateSuggestions();
     }
 
+    private getPrefixActionType(text: string): ActionType | null {
+        if (text.startsWith(this.hybridSearchPrefix)) return ActionType.Hybrid;
+        if (text.startsWith(this.fileSearchPrefix)) return ActionType.Files;
+        if (text.startsWith(this.tagSearchPrefix)) return ActionType.Tags;
+        return null;
+    }
+
+    private getAdapterForActionType(type: ActionType): SuggestModalAdapter {
+        switch (type) {
+            case ActionType.Hybrid: return this.hybridAdapter;
+            case ActionType.Files: return this.fileAdapter;
+            case ActionType.Tags: return this.tagAdapter;
+            default: return this.commandAdapter;
+        }
+    }
+
+    private static getModeAttribute(type: ActionType): string {
+        switch (type) {
+            case ActionType.Hybrid: return 'hybrid';
+            case ActionType.Files: return 'files';
+            case ActionType.Tags: return 'tags';
+            default: return 'commands';
+        }
+    }
+
     updateActionType(): boolean {
         const text: string = this.inputEl.value;
-        let nextAdapter;
-        let type;
+        const prefixType = this.getPrefixActionType(text);
 
-        if (text.startsWith(this.hybridSearchPrefix)) {
-            type = ActionType.Hybrid;
-            nextAdapter = this.hybridAdapter;
-            this.modalEl.setAttribute('palette-mode', 'hybrid');
-        } else if (text.startsWith(this.fileSearchPrefix)) {
-            type = ActionType.Files;
-            nextAdapter = this.fileAdapter;
-            this.modalEl.setAttribute('palette-mode', 'files');
-        } else if (text.startsWith(this.tagSearchPrefix)) {
-            type = ActionType.Tags;
-            nextAdapter = this.tagAdapter;
-            this.modalEl.setAttribute('palette-mode', 'tags');
-        } else if (this.initialMode) {
-            // Use initialMode when no prefix matches (for direct hotkey opening)
-            type = this.initialMode;
-            if (type === ActionType.Hybrid) {
-                nextAdapter = this.hybridAdapter;
-                this.modalEl.setAttribute('palette-mode', 'hybrid');
-            } else if (type === ActionType.Files) {
-                nextAdapter = this.fileAdapter;
-                this.modalEl.setAttribute('palette-mode', 'files');
-            } else if (type === ActionType.Tags) {
-                nextAdapter = this.tagAdapter;
-                this.modalEl.setAttribute('palette-mode', 'tags');
-            } else {
-                type = ActionType.Commands;
-                nextAdapter = this.commandAdapter;
-                this.modalEl.setAttribute('palette-mode', 'commands');
-            }
-            // Keep initialMode persistent - mode stays locked until user types a different prefix
-        } else {
-            type = ActionType.Commands;
-            nextAdapter = this.commandAdapter;
-            this.modalEl.setAttribute('palette-mode', 'commands');
+        // Typing a prefix for another mode ends the initial (hotkey) mode default
+        if (prefixType !== null && this.initialMode !== undefined && prefixType !== this.initialMode) {
+            this.initialMode = undefined;
         }
+
+        const type = prefixType ?? this.initialMode ?? ActionType.Commands;
+        const nextAdapter = this.getAdapterForActionType(type);
+        this.modalEl.setAttribute('palette-mode', BetterCommandPaletteModal.getModeAttribute(type));
 
         if (type !== this.actionType) {
             this.currentAdapter?.unmount();
@@ -368,9 +430,9 @@ class BetterCommandPaletteModal extends SuggestModal<Match> implements UnsafeSug
             this.updateEmptyStateText();
             this.updateTitleText();
             this.updateInstructions();
-            this.currentSuggestions = this.currentAdapter
+            this.setCurrentSuggestions(this.currentAdapter
                 .getSortedItems()
-                .slice(0, this.suggestionLimit);
+                .slice(0, this.getResultLimit()));
         }
 
         return wasUpdated;
@@ -405,42 +467,87 @@ class BetterCommandPaletteModal extends SuggestModal<Match> implements UnsafeSug
         return this.currentAdapter.getSortedItems();
     }
 
+    /**
+     * Maximum number of results to show for the current mode.
+     * Hybrid search has its own configurable result count.
+     */
+    private getResultLimit(): number {
+        if (this.actionType === ActionType.Hybrid) {
+            return this.plugin.settings.hybridSearch.maxResults || this.suggestionLimit;
+        }
+        return this.suggestionLimit;
+    }
+
+    private setCurrentSuggestions(matches: Match[]): void {
+        this.currentSuggestions = matches;
+        this.limit = matches.length;
+    }
+
     receivedSuggestions(msg: MessageEvent) {
+        const result = msg.data as SuggestionsWorkerResultMessage;
+
+        if (!result || result.type !== 'result') {
+            return;
+        }
+
+        const currentMode = this.currentAdapter.getWorkerMode();
+        if (
+            this.activeWorkerRequestId === 0
+            || result.requestId !== this.activeWorkerRequestId
+            || result.mode !== currentMode
+        ) {
+            return;
+        }
+
+        this.activeWorkerRequestId = 0;
+
+        const hiddenIds = new Set(this.currentAdapter.hiddenIds);
         const results = [];
         let hiddenCount = 0;
 
         for (
             let i = 0;
-            i < msg.data.length && results.length < this.suggestionLimit + hiddenCount;
+            i < result.items.length && results.length < this.suggestionLimit + hiddenCount;
             i += 1
         ) {
-            results.push(msg.data[i]);
+            results.push(result.items[i]);
 
-            if (this.currentAdapter.hiddenIds.includes(msg.data[i].id)) {
+            if (hiddenIds.has(result.items[i].id)) {
                 hiddenCount += 1;
             }
         }
 
         const matches = results.map((r: Match) => new PaletteMatch(r.id, r.text, r.tags));
 
-        // Sort the suggestions so that previously searched items are first
-        const prevItems = this.currentAdapter.getPrevItems();
-        matches.sort((a, b) => (+prevItems.has(b)) - (+prevItems.has(a)));
-
-        this.currentSuggestions = matches;
-        this.limit = this.currentSuggestions.length;
+        this.setCurrentSuggestions(matches);
         this.updateSuggestions();
     }
 
-    getSuggestionsAsync(query: string) {
-        const items = this.getItems();
+    /**
+     * Run a fuzzy search for the current adapter in the suggestions worker.
+     * Returns false if the current adapter has no worker corpus.
+     */
+    getSuggestionsAsync(query: string): boolean {
+        const mode = this.currentAdapter.getWorkerMode();
+        if (!mode) {
+            return false;
+        }
+
+        this.ensureWorkerCorpusRegistered(mode);
+        nextWorkerRequestId += 1;
+        this.activeWorkerRequestId = nextWorkerRequestId;
         this.suggestionsWorker.postMessage({
+            type: 'query',
+            mode,
             query,
-            items,
+            requestId: this.activeWorkerRequestId,
+            // Headroom for hidden items, which are counted but filtered out of the view
+            limit: this.suggestionLimit + this.currentAdapter.hiddenIds.length,
         });
+        return true;
     }
 
-    private applySearchResults(matches: Match[], shouldUpdate = true) {
+    private applySearchResults(matches: Match[], preserveSelection = false) {
         // Use the original matches directly to preserve custom properties (like hybridResult)
         const uniqueById = new Map<string, Match>();
 
@@ -455,41 +562,117 @@ class BetterCommandPaletteModal extends SuggestModal<Match> implements UnsafeSug
         // For hybrid search, recency is already factored into the scoring algorithm
         // via usageTracker.getRecencyScore(), so we don't need to front-sort by prevItems
 
-        this.currentSuggestions = deduped.slice(0, this.suggestionLimit);
-        this.limit = this.currentSuggestions.length;
+        this.setCurrentSuggestions(deduped.slice(0, this.getResultLimit()));
+        this.renderSuggestions(preserveSelection);
+    }
 
-        if (shouldUpdate) {
-            this.suppressNextSearchUpdate = true;
-            this.updateSuggestions();
+    /**
+     * Redraw the list. When preserveSelection is set, keep the user's selected item
+     * selected if it is still present (the chooser otherwise resets to the first row).
+     */
+    private renderSuggestions(preserveSelection: boolean): void {
+        const chooser = this.chooser as SelectableChooser;
+        const previousId = preserveSelection && (chooser.selectedItem ?? 0) > 0
+            ? this.getSelectedMatch()?.id
+            : undefined;
+
+        this.updateSuggestions();
+
+        if (!previousId || typeof chooser.setSelectedItem !== 'function') {
+            return;
+        }
+
+        const index = chooser.values?.findIndex((match) => match.id === previousId) ?? -1;
+        if (index > 0) {
+            chooser.setSelectedItem(index, false);
         }
     }
 
-    private cancelEnhancedSearch() {
+    /**
+     * Cancel any in-flight or scheduled search so its results are ignored.
+     */
+    private cancelPendingSearch(): void {
+        this.searchSequence += 1;
+        this.activeWorkerRequestId = 0;
+
+        if (this.searchDebounceTimer !== null) {
+            window.clearTimeout(this.searchDebounceTimer);
+            this.searchDebounceTimer = null;
+        }
+
         if (this.currentSearchAbortController) {
             this.currentSearchAbortController.abort();
             this.currentSearchAbortController = undefined;
         }
     }
 
-    async getEnhancedSearchResults(query: string) {
-        try {
-            const adapter = this.currentAdapter;
-            this.cancelEnhancedSearch();
+    /**
+     * Start a search for the (already cleaned) query using the best available engine.
+     * Results are applied asynchronously; anything synchronous is written to
+     * currentSuggestions for the caller to return.
+     */
+    private requestSuggestions(query: string, immediate: boolean): void {
+        const adapter = this.currentAdapter;
+        this.cancelPendingSearch();
 
+        if (!adapter.usesEnhancedSearch()) {
+            this.getSuggestionsAsync(query);
+            return;
+        }
+
+        if (query === '') {
+            // No query: show the adapter's default ordering (recent/pinned first)
+            this.setCurrentSuggestions(adapter.getSortedItems().slice(0, this.getResultLimit()));
+            return;
+        }
+
+        if (!adapter.canUseEnhancedSearch(query)) {
+            // Index not ready, query too short or query syntax the index can't handle:
+            // fall back to the fuzzy worker, or show the empty state if there is none
+            if (!this.getSuggestionsAsync(query)) {
+                this.setCurrentSuggestions([]);
+            }
+            return;
+        }
+
+        const sequence = this.searchSequence;
+        const delay = immediate ? 0 : adapter.getSearchDebounceMs();
+        // Always defer so results are never applied re-entrantly from getSuggestions
+        this.searchDebounceTimer = window.setTimeout(() => {
+            this.searchDebounceTimer = null;
+            this.getEnhancedSearchResults(query, adapter, sequence);
+        }, delay);
+    }
+
+    async getEnhancedSearchResults(
+        query: string,
+        adapter: SuggestModalAdapter = this.currentAdapter,
+        sequence: number = this.searchSequence,
+    ): Promise<void> {
+        const isStale = () => sequence !== this.searchSequence || adapter !== this.currentAdapter;
+
+        try {
             if (adapter.streamSearchResults) {
                 const controller = new AbortController();
                 this.currentSearchAbortController = controller;
+                let hasRendered = false;
 
                 await adapter.streamSearchResults(query, {
-                    limit: this.suggestionLimit,
+                    limit: this.getResultLimit(),
                     signal: controller.signal,
                     onUpdate: (matches, done) => {
-                        if (controller.signal.aborted || adapter !== this.currentAdapter) {
+                        if (controller.signal.aborted || isStale()) {
                             return;
                         }
-                        this.applySearchResults(matches);
-                        if (done) {
-                            this.cancelEnhancedSearch();
+
+                        // Redraw at most twice per query: an initial partial list and the final list
+                        if (done || !hasRendered) {
+                            this.applySearchResults(matches, hasRendered);
+                            hasRendered = true;
+                        }
+
+                        if (done && this.currentSearchAbortController === controller) {
+                            this.currentSearchAbortController = undefined;
                         }
                     },
                 });
@@ -500,7 +683,7 @@ class BetterCommandPaletteModal extends SuggestModal<Match> implements UnsafeSug
             if (adapter.getSearchResults) {
                 const results = await adapter.getSearchResults(query);
 
-                if (adapter !== this.currentAdapter) {
+                if (isStale()) {
                     return;
                 }
 
@@ -511,19 +694,38 @@ class BetterCommandPaletteModal extends SuggestModal<Match> implements UnsafeSug
             // Fallback to worker-based search if no enhanced search is available
             this.getSuggestionsAsync(query);
         } catch (error) {
-            this.cancelEnhancedSearch();
+            if (isStale()) {
+                return;
+            }
+
+            this.currentSearchAbortController = undefined;
             logger.error('Enhanced search failed:', error);
-            // Fallback to worker-based search on error
-            this.getSuggestionsAsync(query);
+            // Fallback to worker-based search on error, or show the empty state
+            if (!this.getSuggestionsAsync(query)) {
+                this.applySearchResults([]);
+            }
         }
     }
 
+    /**
+     * Force a fresh search for the current query (e.g. after ranking feedback).
+     */
+    refreshSuggestions(): void {
+        this.forceNextSearch = true;
+        this.updateSuggestions();
+    }
+
     getSuggestions(query: string): Match[] {
-        // Handle the case where getSuggestions is called before onOpen sets the initial input value
-        // This can happen when the base SuggestModal calls getSuggestions("") immediately upon opening
+        // Handle the case where getSuggestions is called before onOpen sets the initial input value.
+        // This can happen when the base SuggestModal calls getSuggestions("") immediately upon opening.
+        // Only applies during opening so the user can still clear the prefix afterwards.
         let effectiveQuery = query;
-        if (this.initialInputValue && query === '' && this.inputEl.value !== this.initialInputValue) {
-            // Use the initial input value if the query is empty and input hasn't been set yet
+        if (
+            !this.initialInputApplied
+            && this.initialInputValue
+            && query === ''
+            && this.inputEl.value !== this.initialInputValue
+        ) {
             effectiveQuery = this.initialInputValue;
             this.inputEl.value = this.initialInputValue;
         }
@@ -536,44 +738,29 @@ class BetterCommandPaletteModal extends SuggestModal<Match> implements UnsafeSug
             this.currentAdapter.initialize();
         }
 
-        const shouldSuppressSearch = this.suppressNextSearchUpdate
-            && this.currentAdapter.usesEnhancedSearch
-            && this.currentAdapter.usesEnhancedSearch();
+        const forced = this.forceNextSearch;
+        const getNewSuggestions = effectiveQuery !== this.lastQuery
+            || actionTypeChanged
+            || forced;
 
-        const getNewSuggestions = (effectiveQuery !== this.lastQuery
-            || this.currentSuggestions.length === 0
-            || actionTypeChanged) && !shouldSuppressSearch;
-
-        this.suppressNextSearchUpdate = false;
+        this.forceNextSearch = false;
         this.lastQuery = effectiveQuery;
-        const fixedQuery = this.currentAdapter.cleanQuery(effectiveQuery.trim());
 
         if (getNewSuggestions) {
-            // If the action type changed, clear current suggestions to avoid showing wrong adapter's results
-            if (actionTypeChanged) {
-                this.currentSuggestions = [];
+            const fixedQuery = this.currentAdapter.cleanQuery(effectiveQuery.trim());
+
+            // If the action type changed, don't show the previous adapter's results (or the
+            // unfiltered list) for a non-empty query while the new search runs
+            if (actionTypeChanged && fixedQuery !== '') {
+                this.setCurrentSuggestions([]);
             }
 
-            // Check if the adapter supports enhanced search
-            if (this.currentAdapter.usesEnhancedSearch && this.currentAdapter.usesEnhancedSearch()) {
-                // Use enhanced search directly
-                this.getEnhancedSearchResults(fixedQuery);
-
-                // If we don't have suggestions yet and this is an empty/initial query,
-                // return some initial suggestions from the adapter
-                if (this.currentSuggestions.length === 0) {
-                    this.currentSuggestions = this.currentAdapter
-                        .getSortedItems()
-                        .slice(0, this.suggestionLimit);
-                }
-            } else {
-                // Use worker-based search for other adapters
-                this.getSuggestionsAsync(fixedQuery);
-            }
+            this.requestSuggestions(fixedQuery, actionTypeChanged || forced);
         }
 
+        const hiddenIds = new Set(this.currentAdapter.hiddenIds);
         const visibleItems = this.currentSuggestions.filter(
-            (match) => !this.currentAdapter.hiddenIds.includes(match.id),
+            (match) => !hiddenIds.has(match.id),
         );
 
         const hiddenItemCount = this.currentSuggestions.length - visibleItems.length;
@@ -609,7 +796,7 @@ class BetterCommandPaletteModal extends SuggestModal<Match> implements UnsafeSug
         const flairContainer = suggestionAux.createEl('span', 'suggestion-flair');
         renderPrevItems(this.plugin.settings, match, suggestionContent, this.currentAdapter.getPrevItems());
 
-        setIcon(flairContainer, icon, 13);
+        setIcon(flairContainer, icon);
         flairContainer.ariaLabel = isHidden ? 'Click to Unhide' : 'Click to Hide';
         flairContainer.setAttr('data-id', match.id);
 
@@ -632,33 +819,18 @@ class BetterCommandPaletteModal extends SuggestModal<Match> implements UnsafeSug
         this.currentAdapter.onChooseSuggestion(item, event);
     }
 
-    private async performEnhancedSearch(query: string): Promise<void> {
-        try {
-            if (!this.enhancedSearchService) {
-                return;
-            }
-
-            const results = await this.enhancedSearchService.search(query, this.currentLimit);
-
-            // Convert enhanced results to suggestion format
-            const enhancedSuggestions = results.map((result) => ({
-                text: result.metadata.path,
-                score: result.relevanceScore,
-                metadata: result.metadata,
-            }));
-
-            // Merge with existing suggestions
-            this.currentSuggestions = [...this.currentSuggestions, ...enhancedSuggestions];
-
-            // Remove duplicates and sort by score
-            const uniqueSuggestions = this.currentSuggestions.filter((suggestion, index, self) => index === self.findIndex((s) => s.text === suggestion.text));
-
-            this.currentSuggestions = uniqueSuggestions
-                .sort((a, b) => (b.score || 0) - (a.score || 0))
-                .slice(0, this.currentLimit);
-        } catch (error) {
-            logger.error('Enhanced search failed:', error);
+    private ensureWorkerCorpusRegistered(mode: WorkerMode): void {
+        const version = this.currentAdapter.getWorkerCorpusVersion();
+        if (this.registeredWorkerCorpusVersions.get(mode) === version) {
+            return;
         }
+
+        this.suggestionsWorker.postMessage({
+            type: 'register',
+            mode,
+            items: this.currentAdapter.getWorkerItems(),
+        });
+        this.registeredWorkerCorpusVersions.set(mode, version);
     }
 }
 

@@ -30,7 +30,7 @@ export class BetterCommandPaletteSettingTab extends PluginSettingTab {
             new HybridTab(),
             new QuickLinkTab(),
             new MacrosTab(),
-            new DangerZoneTab(),
+            new DangerZoneTab(() => this.display()),
         ];
     }
 

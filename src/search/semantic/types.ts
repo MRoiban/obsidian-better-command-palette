@@ -1,8 +1,10 @@
 /**
- * Types for semantic search functionality using Ollama embeddings
+ * Types for semantic search functionality (local in-plugin or Ollama embeddings)
  */
 
 import { TFile } from 'obsidian';
+import type { EmbeddingProviderId } from './providers/types';
+import type { LocalDeviceSetting, LocalDtypeSetting } from './providers/model-registry';
 
 export interface EmbeddingCache {
     version: string; // "2.0.0" for chunk-based embeddings
@@ -48,13 +50,23 @@ export interface SemanticSearchResult {
 
 export interface SemanticSearchSettings {
     enableSemanticSearch: boolean;
+    embeddingProvider: EmbeddingProviderId; // 'local' = in-plugin Transformers.js, 'ollama' = Ollama server
+    localModel: string; // Local model registry id, or 'custom'
+    localCustomModelId: string; // Hugging Face model id used when localModel is 'custom'
+    localDevice: LocalDeviceSetting; // 'auto' = WebGPU when an adapter is available, else WASM
+    localDtype: LocalDtypeSetting; // ONNX weight precision; 'auto' = the model's default
     ollamaUrl: string;
     embeddingModel?: string; // Embedding model name in Ollama (e.g., nomic-embed-text, bge-m3)
     searchThreshold: number;
     maxResults: number;
     chunkSize: number;
+    maxIndexedFiles: number; // Maximum markdown files to include in semantic indexing
+    maxFileSize: number; // Maximum file size in bytes for semantic indexing
+    searchTimeoutMs: number; // Timeout for interactive query embeddings
+    indexingRequestTimeoutMs: number; // Timeout for document indexing embeddings
+    autoIndexOnStartup: boolean; // Automatically build an empty semantic index on startup
     // Concurrency settings
-    maxConcurrentRequests: number; // User-configurable ceiling (1-10)
+    maxConcurrentRequests: number; // User-configurable ceiling (1-10), Ollama only
     enableAdaptiveThrottling: boolean; // Smart throttling that adjusts based on Ollama response times
     cacheEnabled: boolean;
     excludePatterns: string[]; // Array of glob patterns to exclude from indexing

@@ -1,8 +1,24 @@
 /**
  * Query Filter Parser for Hybrid Search
- * 
+ *
  * Parses frontmatter field operators from search queries.
- * Supports operators like `rating:>4`, `status:done`, `author:~john`.
+ *
+ * Syntax (a filter must start a whitespace-separated token):
+ *   field:value       exact match (case-insensitive; arrays match any element)
+ *   field:>value      greater than      field:>=value   greater than or equal
+ *   field:<value      less than         field:<=value   less than or equal
+ *   field:~value      contains substring
+ *   field:!=value     not equal
+ *   -field:value      negates any filter (e.g. `-status:done`, `-rating:>3`)
+ *   field:"a b"       quoted values may contain spaces
+ *
+ * A value starting with `-` is a literal value, so `temp:-5` means "temp equals -5".
+ * Values are compared numerically when both sides are plain numbers, as dates when
+ * both sides parse as dates (e.g. `date:>2024-06-01`), and as strings otherwise
+ * (`version:>1.2.3` uses natural ordering).
+ *
+ * Tokens that look like URLs (`https://...`) or times (`10:30`) are not filters.
+ * Field names are matched against frontmatter keys case-insensitively.
  */
 
 import { TFile, MetadataCache } from 'obsidian';
@@ -18,13 +34,13 @@ export type FilterOperator =
     | 'gte'      // Greater than or equal (field:>=value)
     | 'lte'      // Less than or equal (field:<=value)
     | 'contains' // Contains substring (field:~value)
-    | 'neq';     // Not equal (field:-value)
+    | 'neq';     // Not equal (field:!=value)
 
 /**
  * A parsed filter from the query
  */
 export interface QueryFilter {
-    /** The frontmatter field to filter on */
+    /** The frontmatter field to filter on (original case; lookup is case-insensitive) */
     field: string;
     /** The comparison operator */
     operator: FilterOperator;
@@ -34,6 +50,8 @@ export interface QueryFilter {
     rawValue: string;
     /** The original matched string for removal from query */
     rawMatch: string;
+    /** True when the filter was prefixed with `-` and its result is inverted */
+    negated?: boolean;
 }
 
 /**
@@ -47,11 +65,17 @@ export interface ParsedQuery {
 }
 
 /**
- * Regex pattern for matching filter expressions
- * Matches: field:>=value, field:<=value, field:>value, field:<value, field:~value, field:-value, field:value
- * ORDER MATTERS: Check >= and <= before > and <
+ * Regex pattern for matching filter expressions.
+ * Groups: 1 = negation prefix, 2 = field, 3 = operator, 4 = value.
+ * ORDER MATTERS: Check >=, <= and != before > and <.
  */
-const FILTER_REGEX = /(\w+):(>=|<=|>|<|~|-)?("[^"]+"|'[^']+'|[^\s]+)/g;
+const FILTER_REGEX = /(?<=^|\s)(-)?([\p{L}\p{N}_][\p{L}\p{N}_-]*):(>=|<=|!=|>|<|~)?("[^"]+"|'[^']+'|\S+)/gu;
+
+const LEADING_DIGIT_FIELD_REGEX = /^\p{N}/u;
+
+const NUMBER_REGEX = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i;
+
+const ISO_DATE_REGEX = /^\d{4}(?:-\d{2}(?:-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?)?)?$/;
 
 /**
  * Map operator symbols to FilterOperator type
@@ -60,12 +84,25 @@ function parseOperator(symbol: string | undefined): FilterOperator {
     switch (symbol) {
         case '>=': return 'gte';
         case '<=': return 'lte';
+        case '!=': return 'neq';
         case '>': return 'gt';
         case '<': return 'lt';
         case '~': return 'contains';
-        case '-': return 'neq';
         default: return 'eq';
     }
+}
+
+/**
+ * Parse a whole string as a finite number, or return null.
+ * Unlike parseFloat, "2024-06-01" and "1.2.3" are not numbers.
+ */
+function parseStrictNumber(value: string): number | null {
+    const trimmed = value.trim();
+    if (!NUMBER_REGEX.test(trimmed)) {
+        return null;
+    }
+    const num = Number(trimmed);
+    return Number.isFinite(num) ? num : null;
 }
 
 /**
@@ -79,55 +116,72 @@ function parseValue(rawValue: string): string | number {
         value = value.slice(1, -1);
     }
 
-    // Try to parse as number
-    const numValue = parseFloat(value);
-    if (!isNaN(numValue) && isFinite(numValue)) {
-        return numValue;
+    const numValue = parseStrictNumber(value);
+    return numValue ?? value;
+}
+
+/**
+ * Whether a regex match is a real filter rather than a URL, time, or similar token.
+ */
+function isFilterCandidate(field: string, operatorSymbol: string | undefined, rawValue: string): boolean {
+    // Times/ratios like 10:30 or 2024-06-01T10:30 (field names never start with a digit)
+    if (LEADING_DIGIT_FIELD_REGEX.test(field)) {
+        return false;
     }
 
-    return value;
+    // URL schemes like https://example.com or obsidian://open
+    if (!operatorSymbol && rawValue.startsWith('//')) {
+        return false;
+    }
+
+    return true;
 }
 
 /**
  * Parse a search query to extract frontmatter filters
- * 
+ *
  * @param query The full search query string
  * @returns ParsedQuery with filters extracted and clean text query
- * 
+ *
  * @example
  * parseQueryFilters("rating:>4 machine learning")
  * // Returns: { textQuery: "machine learning", filters: [{ field: "rating", operator: "gt", value: 4 }] }
  */
 export function parseQueryFilters(query: string): ParsedQuery {
     const filters: QueryFilter[] = [];
-    let textQuery = query;
+    const textParts: string[] = [];
+    let cursor = 0;
 
     // Reset regex state
     FILTER_REGEX.lastIndex = 0;
 
     let match: RegExpExecArray | null;
     while ((match = FILTER_REGEX.exec(query)) !== null) {
-        const [rawMatch, field, operatorSymbol, rawValue] = match;
+        const [rawMatch, negation, field, operatorSymbol, rawValue] = match;
+
+        if (!isFilterCandidate(field, operatorSymbol, rawValue)) {
+            continue;
+        }
 
         const filter: QueryFilter = {
-            field: field.toLowerCase(),
+            field,
             operator: parseOperator(operatorSymbol),
             value: parseValue(rawValue),
             rawValue,
             rawMatch,
         };
+        if (negation) {
+            filter.negated = true;
+        }
 
         filters.push(filter);
-        logger.debug(`Query filter parsed:`, filter);
+        textParts.push(query.slice(cursor, match.index));
+        cursor = match.index + rawMatch.length;
     }
+    textParts.push(query.slice(cursor));
 
-    // Remove all filter expressions from query
-    for (const filter of filters) {
-        textQuery = textQuery.replace(filter.rawMatch, '');
-    }
-
-    // Clean up extra whitespace
-    textQuery = textQuery.replace(/\s+/g, ' ').trim();
+    // Remove filter expressions by position and clean up extra whitespace
+    const textQuery = textParts.join(' ').replace(/\s+/g, ' ').trim();
 
     if (filters.length > 0) {
         logger.debug(`Parsed ${filters.length} filters from query. Remaining text query: "${textQuery}"`);
@@ -137,8 +191,39 @@ export function parseQueryFilters(query: string): ParsedQuery {
 }
 
 /**
+ * Stable string form of filters, used for cache keys.
+ */
+export function serializeFilters(filters: QueryFilter[]): string {
+    return filters
+        .map((f) => `${f.negated ? '-' : ''}${f.field}\u0000${f.operator}\u0000${typeof f.value}\u0000${f.value}`)
+        .join('\u0001');
+}
+
+/**
+ * Look up a frontmatter field, preferring an exact key match and falling back
+ * to a case-insensitive match (frontmatter keys are case-sensitive in YAML).
+ */
+function getFieldValue(frontmatter: Record<string, unknown>, field: string): unknown {
+    if (Object.prototype.hasOwnProperty.call(frontmatter, field)) {
+        return frontmatter[field];
+    }
+
+    const fieldLower = field.toLowerCase();
+    for (const key of Object.keys(frontmatter)) {
+        if (key.toLowerCase() === fieldLower) {
+            return frontmatter[key];
+        }
+    }
+
+    return undefined;
+}
+
+/**
  * Evaluate a single filter against frontmatter data
- * 
+ *
+ * Missing frontmatter is treated exactly like an empty frontmatter object:
+ * a missing field fails every operator except `neq`, and negation inverts that.
+ *
  * @param filter The filter to evaluate
  * @param frontmatter The file's frontmatter (can be undefined)
  * @returns true if the filter passes, false otherwise
@@ -147,12 +232,15 @@ export function evaluateFilter(
     filter: QueryFilter,
     frontmatter: Record<string, any> | undefined,
 ): boolean {
-    // If no frontmatter, fail all filters
-    if (!frontmatter) {
-        return false;
-    }
+    const result = evaluateOperator(filter, frontmatter ?? {});
+    return filter.negated ? !result : result;
+}
 
-    const fieldValue = frontmatter[filter.field];
+function evaluateOperator(
+    filter: QueryFilter,
+    frontmatter: Record<string, any>,
+): boolean {
+    const fieldValue = getFieldValue(frontmatter, filter.field);
 
     // Check if field exists
     if (fieldValue === undefined || fieldValue === null) {
@@ -170,16 +258,16 @@ export function evaluateFilter(
             return !compareEqual(fieldValue, filterValue);
 
         case 'gt':
-            return compareNumeric(fieldValue, filterValue, (a, b) => a > b);
+            return compareOrdered(fieldValue, filterValue, (a, b) => a > b);
 
         case 'lt':
-            return compareNumeric(fieldValue, filterValue, (a, b) => a < b);
+            return compareOrdered(fieldValue, filterValue, (a, b) => a < b);
 
         case 'gte':
-            return compareNumeric(fieldValue, filterValue, (a, b) => a >= b);
+            return compareOrdered(fieldValue, filterValue, (a, b) => a >= b);
 
         case 'lte':
-            return compareNumeric(fieldValue, filterValue, (a, b) => a <= b);
+            return compareOrdered(fieldValue, filterValue, (a, b) => a <= b);
 
         case 'contains':
             return compareContains(fieldValue, filterValue);
@@ -193,15 +281,18 @@ export function evaluateFilter(
 /**
  * Compare for equality (handles arrays, case-insensitive strings)
  */
-function compareEqual(fieldValue: any, filterValue: string | number): boolean {
+function compareEqual(fieldValue: unknown, filterValue: string | number): boolean {
     // If field is an array, check if any element matches
     if (Array.isArray(fieldValue)) {
         return fieldValue.some(item => compareEqual(item, filterValue));
     }
 
-    // Numeric comparison
-    if (typeof fieldValue === 'number' && typeof filterValue === 'number') {
-        return fieldValue === filterValue;
+    // Numeric comparison (frontmatter strings like "4" still count as numbers)
+    if (typeof filterValue === 'number') {
+        const fieldNum = toStrictNumber(fieldValue);
+        if (fieldNum !== null) {
+            return fieldNum === filterValue;
+        }
     }
 
     // Boolean comparison
@@ -215,19 +306,33 @@ function compareEqual(fieldValue: any, filterValue: string | number): boolean {
     return String(fieldValue).toLowerCase() === String(filterValue).toLowerCase();
 }
 
+function toStrictNumber(value: unknown): number | null {
+    if (typeof value === 'number') {
+        return Number.isFinite(value) ? value : null;
+    }
+    if (typeof value === 'string') {
+        return parseStrictNumber(value);
+    }
+    return null;
+}
+
 /**
- * Compare numerically or as dates
+ * Compare numerically, then as dates, then as strings (natural order).
  */
-function compareNumeric(
-    fieldValue: any,
+function compareOrdered(
+    fieldValue: unknown,
     filterValue: string | number,
     comparator: (a: number, b: number) => boolean,
 ): boolean {
-    // Try numeric comparison first
-    const fieldNum = typeof fieldValue === 'number' ? fieldValue : parseFloat(String(fieldValue));
-    const filterNum = typeof filterValue === 'number' ? filterValue : parseFloat(String(filterValue));
+    // If field is an array, check if any element satisfies the comparison
+    if (Array.isArray(fieldValue)) {
+        return fieldValue.some(item => compareOrdered(item, filterValue, comparator));
+    }
 
-    if (!isNaN(fieldNum) && !isNaN(filterNum)) {
+    const fieldNum = toStrictNumber(fieldValue);
+    const filterNum = toStrictNumber(filterValue);
+
+    if (fieldNum !== null && filterNum !== null) {
         return comparator(fieldNum, filterNum);
     }
 
@@ -239,38 +344,32 @@ function compareNumeric(
         return comparator(fieldDate, filterDate);
     }
 
-    // If all else fails, compare as strings
-    logger.debug(`Falling back to string comparison for filter value: ${filterValue}`);
+    // If all else fails, compare as strings with natural number ordering (1.10 > 1.9)
     return comparator(
-        String(fieldValue).localeCompare(String(filterValue)),
-        0
+        String(fieldValue).localeCompare(String(filterValue), undefined, { numeric: true, sensitivity: 'base' }),
+        0,
     );
 }
 
 /**
  * Try to parse a value as a date, returning timestamp or null
  */
-function tryParseDate(value: any): number | null {
+function tryParseDate(value: unknown): number | null {
     if (value instanceof Date) {
-        return value.getTime();
+        const time = value.getTime();
+        return isNaN(time) ? null : time;
     }
 
     if (typeof value === 'string') {
-        // Handle YYYY, YYYY-MM, YYYY-MM-DD formats
-        const dateMatch = value.match(/^(\d{4})(?:-(\d{2}))?(?:-(\d{2}))?$/);
-        if (dateMatch) {
-            const [, year, month = '01', day = '01'] = dateMatch;
-            const parsed = Date.parse(`${year}-${month}-${day}`);
-            if (!isNaN(parsed)) {
-                return parsed;
-            }
+        const trimmed = value.trim();
+        if (!ISO_DATE_REGEX.test(trimmed)) {
+            return null;
         }
 
-        // Try general date parsing
-        const parsed = Date.parse(value);
-        if (!isNaN(parsed)) {
-            return parsed;
-        }
+        // Handle YYYY and YYYY-MM by padding to a full date
+        const [, year, month = '01'] = trimmed.match(/^(\d{4})(?:-(\d{2}))?$/) ?? [];
+        const parsed = year ? Date.parse(`${year}-${month}-01`) : Date.parse(trimmed);
+        return isNaN(parsed) ? null : parsed;
     }
 
     if (typeof value === 'number') {
@@ -290,7 +389,7 @@ function tryParseDate(value: any): number | null {
 /**
  * Check if field value contains the filter value (substring)
  */
-function compareContains(fieldValue: any, filterValue: string | number): boolean {
+function compareContains(fieldValue: unknown, filterValue: string | number): boolean {
     // If field is an array, check if any element contains
     if (Array.isArray(fieldValue)) {
         return fieldValue.some(item => compareContains(item, filterValue));

@@ -4,7 +4,7 @@ import {
 import {
     generateHotKeyText, PaletteMatch, SuggestModalAdapter,
 } from 'src/utils';
-import { Match, UnsafeAppInterface } from 'src/types/types';
+import { Match, UnsafeAppInterface, WorkerMode } from 'src/types/types';
 import { ActionType } from 'src/utils/constants';
 import { logger } from '../utils/logger';
 
@@ -22,21 +22,25 @@ export default class BetterCommandPaletteCommandAdapter extends SuggestModalAdap
 
     pinnedItems: Match[];
 
+    getWorkerMode(): WorkerMode {
+        return 'commands';
+    }
+
     initialize() {
         super.initialize();
 
         this.titleText = 'Better Command Palette: Commands';
         this.emptyStateText = 'No matching commands.';
 
-        this.hiddenIds = this.plugin.settings.hiddenCommands;
+        this.hiddenIds = [...this.plugin.settings.hiddenCommands];
         this.hiddenIdsSettingsKey = 'hiddenCommands';
 
-        this.allItems = this.app.commands.listCommands()
+        this.setItems(this.app.commands.listCommands()
             .sort((a: Command, b: Command) => b.name.localeCompare(a.name))
-            .map((c: Command): Match => new PaletteMatch(c.id, c.name));
+            .map((c: Command): Match => new PaletteMatch(c.id, c.name)));
 
         const pinnedCommands = this.app.internalPlugins.getPluginById('command-palette').instance.options.pinned || [];
-        this.pinnedItems = pinnedCommands.reduce(
+        this.setPinnedItems(pinnedCommands.reduce(
             (acc: Match[], id: string): Match[] => {
                 const command = this.app.commands.findCommand(id);
 
@@ -48,7 +52,7 @@ export default class BetterCommandPaletteCommandAdapter extends SuggestModalAdap
                 return acc;
             },
             [],
-        ).reverse();
+        ).reverse());
     }
 
     mount(): void {
@@ -79,7 +83,7 @@ export default class BetterCommandPaletteCommandAdapter extends SuggestModalAdap
 
         if (this.getPinnedItems().find((i) => i.id === match.id)) {
             const flairContainer = aux.querySelector('.suggestion-flair') as HTMLElement;
-            setIcon(flairContainer, 'filled-pin', 13);
+            setIcon(flairContainer, 'filled-pin');
             flairContainer.ariaLabel = 'Pinned';
             flairContainer.onClickEvent(() => {});
         }
@@ -126,7 +130,7 @@ export default class BetterCommandPaletteCommandAdapter extends SuggestModalAdap
                 await this.app.commands.executeCommandById(match.id);
 
                 // Add to previous items
-                this.prevItems.add(match);
+                this.recordRecentMatch(match);
             }
         } catch (error) {
             logger.error('Error executing command:', error);

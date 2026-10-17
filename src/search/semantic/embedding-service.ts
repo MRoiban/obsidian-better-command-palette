@@ -1,16 +1,34 @@
 /**
- * Embedding service for generating and managing document embeddings using Ollama
- * 
+ * Embedding service for generating and managing document embeddings.
+ * Vectors come from an EmbeddingProvider (in-plugin local model or Ollama);
+ * this service owns chunking, normalization, dimension tracking and caching.
+ *
  * Version 2.0: Stores embeddings per-chunk instead of per-file for better semantic search
  */
 
-import { TFile, Vault, MetadataCache } from 'obsidian';
-// @ts-ignore
-import { requestUrl } from 'obsidian';
+import {
+    App, TFile, Vault, MetadataCache,
+} from 'obsidian';
 import { RequestQueue } from './request-queue';
 import { ChunkEmbedding, EmbeddingCache, SemanticSearchSettings } from './types';
+import {
+    EmbeddingIndexedDbStore, EmbeddingStoreMetadata, LEGACY_EMBEDDING_DB_NAME, StoredEmbeddingRecord,
+    readLegacyEmbeddingRecords,
+} from './embedding-store';
+import {
+    EmbeddingFingerprint, fingerprintKey, getSettingsFingerprint, isFingerprintCompatible, resolveEmbeddingModel,
+} from './embedding-fingerprint';
+import { NonRetryableEmbeddingError } from './http-utils';
+import {
+    EmbeddingKind, EmbeddingProvider, ProviderAvailability, ProviderStatus, ProviderStatusListener,
+} from './providers/types';
+import {
+    EmbeddingProviderContext, createEmbeddingProvider, getProviderConfigKey,
+} from './providers/provider-factory';
+import { createAbortError, isAbortError, throwIfAborted } from './providers/abort-utils';
 import { logger } from '../../utils/logger';
 import { generateContentHashBase36 } from '../../utils/hash';
+import { getVaultScopedName } from '../../utils/vault-storage';
 
 /**
  * Runtime representation of a chunk embedding using Float32Array for performance
@@ -21,6 +39,37 @@ export interface ChunkEmbeddingRuntime {
     startLine?: number;
 }
 
+interface EmbeddingRequestOptions {
+    signal?: AbortSignal;
+    timeoutMs?: number;
+}
+
+export type EmbeddingProviderFactory = (
+    settings: SemanticSearchSettings,
+    context: EmbeddingProviderContext,
+) => EmbeddingProvider;
+
+export interface EmbeddingServiceOptions {
+    /** Vault-relative plugin folder (manifest.dir); holds bundled runtime assets. */
+    pluginDir?: string;
+    /** Override provider construction (tests, tooling). */
+    providerFactory?: EmbeddingProviderFactory;
+}
+
+interface SemanticIndexingOptions {
+    signal?: AbortSignal;
+}
+
+/**
+ * Outcome of indexing a single file.
+ * - indexed: new vectors were generated
+ * - unchanged: existing vectors are still valid (metadata may have been refreshed)
+ * - skipped: nothing stored (excluded, empty, failed, or invalidated mid-flight)
+ */
+export type IndexFileResult = 'indexed' | 'unchanged' | 'skipped';
+
+const CACHE_FORMAT_VERSION = '2.0.0';
+const DEFAULT_SAVE_DEBOUNCE_MS = 2000;
 
 export class EmbeddingService {
     private vault: Vault;
@@ -37,6 +86,10 @@ export class EmbeddingService {
      */
     private chunkEmbeddingsCache: Map<string, ChunkEmbeddingRuntime[]> = new Map();
 
+    private fileCentroidCache: Map<string, Float32Array> = new Map();
+
+    private vectorNormCache = new WeakMap<Float32Array, number>();
+
     /**
      * Metadata for cache validation (lastModified, contentHash)
      */
@@ -44,14 +97,67 @@ export class EmbeddingService {
 
     private cacheFile: string;
 
+    private embeddingStore: EmbeddingIndexedDbStore;
+
+    private embeddingStoreAvailable = false;
+
+    private dirtyFilePaths = new Set<string>();
+
+    private removedFilePaths = new Set<string>();
+
+    private migratedLegacyCache = false;
+
     // Track the expected embedding dimension to ensure consistency across operations
     private expectedDimension?: number;
 
-    // Default embedding model identifier (recorded in cache for validation)
-    private readonly defaultModelId: string = 'nomic-embed-text';
+    /**
+     * Fingerprint key (model + input scheme) the in-memory vectors belong to.
+     * Tracked separately from `settings` because the settings object is mutated in place.
+     */
+    private activeFingerprintKey: string;
 
+    /** Incremented on every change to the indexed vectors; lets consumers invalidate derived caches. */
+    private indexVersion = 0;
 
-    constructor(vault: Vault, metadataCache: MetadataCache, settings: SemanticSearchSettings) {
+    /** Incremented whenever all vectors are invalidated; in-flight indexing from an older generation is discarded. */
+    private generation = 0;
+
+    /** Serializes cache saves so concurrent callers never interleave or drop dirty marks. */
+    private saveChain: Promise<void> = Promise.resolve();
+
+    private saveTimer?: number;
+
+    private closed = false;
+
+    private inFlightIndexing = new Map<string, Promise<IndexFileResult>>();
+
+    private staleFileListener?: (file: TFile) => void;
+
+    /** Set when cached vectors were discarded on load because the embedding fingerprint changed. */
+    private invalidatedOnLoad = false;
+
+    /** Created lazily; replaced when provider-relevant settings change. */
+    private provider?: EmbeddingProvider;
+
+    private providerConfigKey?: string;
+
+    private readonly providerFactory: EmbeddingProviderFactory;
+
+    private readonly providerContext: EmbeddingProviderContext;
+
+    private providerStatusUnsubscribe?: () => void;
+
+    private providerStatusListeners = new Set<ProviderStatusListener>();
+
+    private lastAvailability?: ProviderAvailability;
+
+    constructor(
+        vault: Vault,
+        metadataCache: MetadataCache,
+        settings: SemanticSearchSettings,
+        app?: App,
+        options: EmbeddingServiceOptions = {},
+    ) {
         this.vault = vault;
         this.metadataCache = metadataCache;
         this.settings = settings;
@@ -59,15 +165,30 @@ export class EmbeddingService {
             settings.maxConcurrentRequests,
             settings.enableAdaptiveThrottling ?? true,
         );
-        this.cacheFile = '.obsidian/plugins/obsidian-better-command-palette/embeddings.json';
+        this.activeFingerprintKey = fingerprintKey(getSettingsFingerprint(settings));
+        const defaultPluginDir = `${vault.configDir}/plugins/obsidian-better-command-palette`;
+        const pluginDir = options.pluginDir ?? defaultPluginDir;
+        this.cacheFile = `${defaultPluginDir}/embeddings.json`;
+        this.providerFactory = options.providerFactory ?? createEmbeddingProvider;
+        this.providerContext = { adapter: vault.adapter, pluginDir };
+        this.applyProviderConcurrency();
 
-        logger.debug(`Semantic search: EmbeddingService initialized with cache file: ${this.cacheFile}`);
+        // Scope the database to this vault. Without `app`, fall back to the vault name
+        // (getVaultId's own fallback) so storage is still per-vault.
+        const scopeApp = app ?? ({ vault } as unknown as App);
+        this.embeddingStore = new EmbeddingIndexedDbStore(getVaultScopedName(scopeApp, LEGACY_EMBEDDING_DB_NAME));
+
+        logger.debug(`Semantic search: EmbeddingService initialized with cache file: ${this.cacheFile}, database: ${this.embeddingStore.getName()}`);
         logger.debug(`Semantic search: Cache enabled: ${settings.cacheEnabled}`);
         logger.debug(`Semantic search: Max concurrent requests: ${settings.maxConcurrentRequests}, adaptive: ${settings.enableAdaptiveThrottling ?? true}`);
     }
 
     async initialize(): Promise<void> {
         logger.debug('Semantic search: Initializing EmbeddingService...');
+        this.closed = false;
+        // Settings may have changed (mutated in place) since construction; the cache load
+        // below discards vectors that don't match this fingerprint.
+        this.activeFingerprintKey = fingerprintKey(getSettingsFingerprint(this.settings));
         if (this.settings.cacheEnabled) {
             logger.debug('Semantic search: Cache is enabled, attempting to load existing cache...');
             await this.loadCache();
@@ -80,187 +201,494 @@ export class EmbeddingService {
         }
     }
 
+    private getCurrentFingerprint(): EmbeddingFingerprint {
+        return { ...getSettingsFingerprint(this.settings), dimension: this.expectedDimension };
+    }
+
     private async loadCache(): Promise<void> {
         try {
-            logger.debug(`Semantic search: Attempting to load cache from ${this.cacheFile}`);
+            this.embeddingStoreAvailable = await this.embeddingStore.initialize();
 
-            if (await this.vault.adapter.exists(this.cacheFile)) {
-                logger.debug('Semantic search: Cache file exists, reading...');
-                const cacheData = await this.vault.adapter.read(this.cacheFile);
-                const cache: EmbeddingCache = JSON.parse(cacheData);
-
-                logger.debug(`Semantic search: Cache loaded with version ${cache.version}, ${Object.keys(cache.embeddings).length} files`);
-
-                // Only accept version 2.0.0 (chunk-based embeddings)
-                // Old versions (1.0.0, 1.1.0) used averaged embeddings and must be rebuilt
-                if (cache.version !== '2.0.0') {
-                    logger.warn(`Semantic search: Cache version ${cache.version} is outdated. Chunk-based embeddings require v2.0.0. Will rebuild index.`);
+            if (this.embeddingStoreAvailable) {
+                let records = await this.embeddingStore.loadAll();
+                if (records.length === 0) {
+                    records = await this.migrateFromLegacyDatabase();
+                }
+                if (records.length > 0) {
+                    const metadata = await this.embeddingStore.loadMetadata();
+                    this.loadStoredEmbeddingRecords(records, metadata);
                     return;
                 }
-
-                let loadedCount = 0;
-                let skippedCount = 0;
-                let dimensionMismatches = 0;
-                let totalChunks = 0;
-
-                for (const [path, fileData] of Object.entries(cache.embeddings)) {
-                    const file = this.vault.getAbstractFileByPath(path) as TFile;
-
-                    if (!file) {
-                        logger.debug(`Semantic search: File ${path} no longer exists, skipping cache entry`);
-                        skippedCount++;
-                        continue;
-                    }
-
-                    if (this.isFileUpToDate(file, fileData)) {
-                        // Validate chunks exist
-                        if (!fileData.chunks || fileData.chunks.length === 0) {
-                            logger.debug(`Semantic search: No chunks for ${path}, skipping`);
-                            skippedCount++;
-                            continue;
-                        }
-
-                        // Convert chunk embeddings from regular array to Float32Array
-                        const chunkEmbeddings: ChunkEmbeddingRuntime[] = [];
-                        let hasValidChunks = true;
-
-                        for (const chunk of fileData.chunks) {
-                            const arr = new Float32Array(chunk.embedding);
-
-                            // Initialize expected dimension if not set
-                            if (this.expectedDimension === undefined) {
-                                this.expectedDimension = cache.dimension ?? arr.length;
-                                logger.debug(`Semantic search: Derived expected dimension ${this.expectedDimension} from cache`);
-                            }
-
-                            // Validate dimension
-                            if (this.expectedDimension !== arr.length) {
-                                logger.warn(`Semantic search: Skipping chunk in ${path} due to dimension mismatch (${arr.length} != ${this.expectedDimension})`);
-                                dimensionMismatches++;
-                                hasValidChunks = false;
-                                break;
-                            }
-
-                            chunkEmbeddings.push({
-                                embedding: arr,
-                                text: chunk.text,
-                                startLine: chunk.startLine,
-                            });
-                        }
-
-                        if (!hasValidChunks) {
-                            skippedCount++;
-                            continue;
-                        }
-
-                        // Store chunk embeddings and metadata
-                        this.chunkEmbeddingsCache.set(path, chunkEmbeddings);
-                        this.cacheMetadata.set(path, {
-                            lastModified: fileData.lastModified,
-                            contentHash: fileData.contentHash,
-                        });
-                        loadedCount++;
-                        totalChunks += chunkEmbeddings.length;
-                        logger.debug(`Semantic search: Loaded ${chunkEmbeddings.length} chunks for ${path}`);
-                    } else {
-                        logger.debug(`Semantic search: File ${path} is newer than cache, skipping`);
-                        skippedCount++;
-                    }
-                }
-
-                logger.debug(`Semantic search: Loaded ${loadedCount} files (${totalChunks} total chunks) from cache, skipped ${skippedCount}`);
-                if (dimensionMismatches > 0) {
-                    logger.warn(`Semantic search: Skipped ${dimensionMismatches} chunks due to dimension mismatch. Consider re-indexing.`);
-                }
-            } else {
-                logger.debug('Semantic search: Cache file does not exist, starting fresh');
             }
+
+            await this.loadLegacyJsonCache();
         } catch (error) {
             logger.error('Semantic search: Error loading embedding cache:', error);
         }
     }
 
-    private isFileUpToDate(file: TFile, cacheData: any): boolean {
+    /**
+     * One-time copy from the pre-vault-scoped shared database. Only records whose
+     * path exists in this vault and whose content hash matches the current file are
+     * copied, so same-named notes from other vaults are never adopted.
+     * The legacy database is left in place for other vaults.
+     */
+    private async migrateFromLegacyDatabase(): Promise<StoredEmbeddingRecord[]> {
+        try {
+            if (await this.embeddingStore.hasMigrationMarker()) {
+                return [];
+            }
+
+            const legacyRecords = await readLegacyEmbeddingRecords();
+            const migrated: StoredEmbeddingRecord[] = [];
+
+            if (legacyRecords && legacyRecords.length > 0) {
+                logger.info(`Semantic search: Migrating embeddings from shared database (${legacyRecords.length} candidate records)`);
+                for (const record of legacyRecords) {
+                    const file = this.vault.getAbstractFileByPath(record.id);
+                    if (!(file instanceof TFile) || !record.chunks?.length) {
+                        continue;
+                    }
+
+                    // eslint-disable-next-line no-await-in-loop
+                    const content = await this.vault.cachedRead(file);
+                    if (generateContentHashBase36(content) !== record.contentHash) {
+                        continue;
+                    }
+
+                    migrated.push({
+                        ...record,
+                        // Content is verified identical, so the vectors are current for this mtime.
+                        lastModified: Math.max(record.lastModified, file.stat.mtime),
+                    });
+                }
+
+                await this.embeddingStore.saveRecords(migrated);
+                logger.info(`Semantic search: Migrated ${migrated.length}/${legacyRecords.length} embedding records into ${this.embeddingStore.getName()}`);
+            }
+
+            await this.embeddingStore.setMigrationMarker(migrated.length);
+            return migrated;
+        } catch (error) {
+            logger.warn('Semantic search: Failed to migrate legacy embedding database:', error);
+            return [];
+        }
+    }
+
+    private async loadLegacyJsonCache(): Promise<void> {
+        logger.debug(`Semantic search: Attempting to load legacy cache from ${this.cacheFile}`);
+        if (!(await this.vault.adapter.exists(this.cacheFile))) {
+            logger.debug('Semantic search: Cache file does not exist, starting fresh');
+            return;
+        }
+
+        const cacheData = await this.vault.adapter.read(this.cacheFile);
+        const cache: EmbeddingCache = JSON.parse(cacheData);
+
+        logger.debug(`Semantic search: Cache loaded with version ${cache.version}, ${Object.keys(cache.embeddings).length} files`);
+
+        // Only accept version 2.0.0 (chunk-based embeddings)
+        // Old versions (1.0.0, 1.1.0) used averaged embeddings and must be rebuilt
+        if (cache.version !== CACHE_FORMAT_VERSION) {
+            logger.warn(`Semantic search: Cache version ${cache.version} is outdated. Chunk-based embeddings require v2.0.0. Will rebuild index.`);
+            return;
+        }
+
+        const current = this.getCurrentFingerprint();
+        if (!isFingerprintCompatible({ model: cache.model, dimension: cache.dimension }, current)) {
+            logger.warn(`Semantic search: Legacy cache was built with model "${cache.model}", current model is "${current.model}". Rebuilding index.`);
+            this.invalidatedOnLoad = true;
+            return;
+        }
+
+        let loadedCount = 0;
+        let staleCount = 0;
+        let skippedCount = 0;
+        let dimensionMismatches = 0;
+        let totalChunks = 0;
+
+        for (const [path, fileData] of Object.entries(cache.embeddings)) {
+            const file = this.vault.getAbstractFileByPath(path);
+
+            if (!(file instanceof TFile)) {
+                logger.debug(`Semantic search: File ${path} no longer exists, skipping cache entry`);
+                skippedCount++;
+                continue;
+            }
+
+            if (!fileData.chunks || fileData.chunks.length === 0) {
+                logger.debug(`Semantic search: No chunks for ${path}, skipping`);
+                skippedCount++;
+                continue;
+            }
+
+            // Convert chunk embeddings from regular array to Float32Array
+            const chunkEmbeddings: ChunkEmbeddingRuntime[] = [];
+            let hasValidChunks = true;
+
+            for (const chunk of fileData.chunks) {
+                const arr = this.normalizeVector(new Float32Array(chunk.embedding));
+
+                // Initialize expected dimension if not set
+                if (this.expectedDimension === undefined) {
+                    this.expectedDimension = cache.dimension ?? arr.length;
+                    logger.debug(`Semantic search: Derived expected dimension ${this.expectedDimension} from cache`);
+                }
+
+                // Validate dimension
+                if (this.expectedDimension !== arr.length) {
+                    logger.warn(`Semantic search: Skipping chunk in ${path} due to dimension mismatch (${arr.length} != ${this.expectedDimension})`);
+                    dimensionMismatches++;
+                    hasValidChunks = false;
+                    break;
+                }
+
+                chunkEmbeddings.push({
+                    embedding: arr,
+                    text: chunk.text,
+                    startLine: chunk.startLine,
+                });
+            }
+
+            if (!hasValidChunks) {
+                skippedCount++;
+                continue;
+            }
+
+            // Stale entries (file modified since) are kept so search keeps working until
+            // the file is re-embedded; their old lastModified marks them for reindexing.
+            if (!this.isFileUpToDate(file, fileData)) {
+                staleCount++;
+            }
+
+            this.chunkEmbeddingsCache.set(path, chunkEmbeddings);
+            this.cacheMetadata.set(path, {
+                lastModified: fileData.lastModified,
+                contentHash: fileData.contentHash,
+            });
+            this.fileCentroidCache.set(path, this.computeCentroid(chunkEmbeddings));
+            this.dirtyFilePaths.add(path);
+            loadedCount++;
+            totalChunks += chunkEmbeddings.length;
+        }
+
+        if (loadedCount > 0) {
+            this.bumpIndexVersion();
+        }
+        logger.debug(`Semantic search: Loaded ${loadedCount} files (${totalChunks} total chunks, ${staleCount} stale) from cache, skipped ${skippedCount}`);
+        this.migratedLegacyCache = loadedCount > 0;
+        if (dimensionMismatches > 0) {
+            logger.warn(`Semantic search: Skipped ${dimensionMismatches} chunks due to dimension mismatch. Consider re-indexing.`);
+        }
+    }
+
+    private loadStoredEmbeddingRecords(records: StoredEmbeddingRecord[], metadata?: EmbeddingStoreMetadata): void {
+        const current = this.getCurrentFingerprint();
+
+        if (metadata && !isFingerprintCompatible(metadata, current)) {
+            logger.warn(`Semantic search: Stored embeddings were built with "${metadata.model}" (${metadata.scheme ?? 'raw-v1'}), current is "${current.model}" (${current.scheme}). Clearing and rebuilding index.`);
+            this.invalidatedOnLoad = true;
+            this.enqueueStoreClear();
+            return;
+        }
+
+        let loadedCount = 0;
+        let staleCount = 0;
+        let incompatibleCount = 0;
+        let skippedCount = 0;
+        let totalChunks = 0;
+
+        for (const record of records) {
+            const file = this.vault.getAbstractFileByPath(record.id);
+            if (!(file instanceof TFile) || !record.chunks?.length) {
+                // Prune records for files that no longer exist on the next save.
+                this.removedFilePaths.add(record.id);
+                skippedCount++;
+                continue;
+            }
+
+            if (!isFingerprintCompatible(record, { ...current, dimension: this.expectedDimension })) {
+                this.removedFilePaths.add(record.id);
+                incompatibleCount++;
+                continue;
+            }
+
+            const chunkEmbeddings = record.chunks.map((chunk) => ({
+                embedding: this.normalizeVector(new Float32Array(chunk.embedding)),
+                text: chunk.text,
+                startLine: chunk.startLine,
+            }));
+
+            const firstChunk = chunkEmbeddings[0];
+            if (firstChunk && this.expectedDimension === undefined) {
+                this.expectedDimension = record.dimension ?? firstChunk.embedding.length;
+            }
+
+            if (this.expectedDimension !== undefined
+                && chunkEmbeddings.some((chunk) => chunk.embedding.length !== this.expectedDimension)) {
+                this.removedFilePaths.add(record.id);
+                incompatibleCount++;
+                continue;
+            }
+
+            // Keep stale vectors until they are replaced; reconciliation re-embeds them.
+            if (!this.isFileUpToDate(file, record)) {
+                staleCount++;
+            }
+
+            this.chunkEmbeddingsCache.set(record.id, chunkEmbeddings);
+            this.cacheMetadata.set(record.id, {
+                lastModified: record.lastModified,
+                contentHash: record.contentHash,
+            });
+            this.fileCentroidCache.set(record.id, this.computeCentroid(chunkEmbeddings));
+            loadedCount++;
+            totalChunks += chunkEmbeddings.length;
+        }
+
+        if (loadedCount === 0 && incompatibleCount > 0) {
+            this.invalidatedOnLoad = true;
+        }
+        if (loadedCount > 0) {
+            this.bumpIndexVersion();
+        }
+
+        logger.debug(`Semantic search: Loaded ${loadedCount} files (${totalChunks} chunks, ${staleCount} stale) from IndexedDB, skipped ${skippedCount}, incompatible ${incompatibleCount}`);
+    }
+
+    private computeCentroid(chunks: ChunkEmbeddingRuntime[]): Float32Array {
+        const firstChunk = chunks[0];
+        if (!firstChunk) {
+            return new Float32Array();
+        }
+
+        const centroid = new Float32Array(firstChunk.embedding.length);
+        chunks.forEach((chunk) => {
+            for (let i = 0; i < centroid.length; i++) {
+                centroid[i] += chunk.embedding[i] || 0;
+            }
+        });
+
+        for (let i = 0; i < centroid.length; i++) {
+            centroid[i] /= chunks.length;
+        }
+
+        return this.normalizeVector(centroid);
+    }
+
+    private computeVectorNorm(vector: Float32Array): number {
+        const cachedNorm = this.vectorNormCache.get(vector);
+        if (cachedNorm !== undefined) {
+            return cachedNorm;
+        }
+
+        let normSquared = 0;
+        for (let i = 0; i < vector.length; i++) {
+            const value = vector[i] || 0;
+            normSquared += value * value;
+        }
+
+        const norm = Math.sqrt(normSquared);
+        this.vectorNormCache.set(vector, norm);
+        return norm;
+    }
+
+    private normalizeVector(vector: Float32Array): Float32Array {
+        const norm = this.computeVectorNorm(vector);
+        if (norm === 0) {
+            return vector;
+        }
+
+        for (let i = 0; i < vector.length; i++) {
+            vector[i] = (vector[i] || 0) / norm;
+        }
+
+        this.vectorNormCache.set(vector, 1);
+        return vector;
+    }
+
+    private isFileUpToDate(file: TFile, cacheData: { lastModified: number }): boolean {
         return file.stat.mtime <= cacheData.lastModified;
     }
 
-    async saveCache(): Promise<void> {
+    private bumpIndexVersion(): void {
+        this.indexVersion++;
+    }
+
+    private markDirty(path: string): void {
+        this.dirtyFilePaths.add(path);
+        this.removedFilePaths.delete(path);
+    }
+
+    /** Whether there are in-memory changes not yet persisted. */
+    hasUnsavedChanges(): boolean {
+        return this.dirtyFilePaths.size > 0 || this.removedFilePaths.size > 0 || this.migratedLegacyCache;
+    }
+
+    /**
+     * Persist dirty embeddings. Saves are serialized: each call waits for any
+     * in-progress save and then writes the changes accumulated so far.
+     */
+    saveCache(): Promise<void> {
+        this.cancelScheduledSave();
+        const run = this.saveChain.then(() => this.performSave());
+        this.saveChain = run.catch(() => undefined);
+        return run;
+    }
+
+    /** Debounced save, e.g. after incremental edits. */
+    scheduleSave(delayMs = DEFAULT_SAVE_DEBOUNCE_MS): void {
+        if (this.closed || !this.settings.cacheEnabled) {
+            return;
+        }
+
+        this.cancelScheduledSave();
+        this.saveTimer = window.setTimeout(() => {
+            this.saveTimer = undefined;
+            this.saveCache().catch((error) => {
+                logger.warn('Semantic search: Scheduled cache save failed:', error);
+            });
+        }, delayMs);
+    }
+
+    cancelScheduledSave(): void {
+        if (this.saveTimer !== undefined) {
+            window.clearTimeout(this.saveTimer);
+            this.saveTimer = undefined;
+        }
+    }
+
+    private async performSave(): Promise<void> {
         if (!this.settings.cacheEnabled) {
             logger.debug('Semantic search: Cache is disabled, skipping save');
             return;
         }
 
-        try {
-            logger.debug(`Semantic search: Starting cache save with ${this.chunkEmbeddingsCache.size} files in memory`);
-            logger.debug(`Semantic search: Saving cache to: ${this.cacheFile}`);
+        if (this.closed) {
+            return;
+        }
 
-            const cache: EmbeddingCache = {
-                version: '2.0.0', // Chunk-based embeddings
-                lastUpdated: Date.now(),
-                model: this.settings.embeddingModel || this.defaultModelId,
-                dimension: this.expectedDimension,
-                embeddings: {},
-            };
+        // Snapshot-and-swap: marks added while this save is awaiting go to the next save.
+        const dirty = this.dirtyFilePaths;
+        const removed = this.removedFilePaths;
+        this.dirtyFilePaths = new Set();
+        this.removedFilePaths = new Set();
+
+        try {
+            if (!this.embeddingStoreAvailable) {
+                this.embeddingStoreAvailable = await this.embeddingStore.initialize();
+            }
+
+            if (!this.embeddingStoreAvailable) {
+                await this.saveLegacyJsonCache();
+                this.migratedLegacyCache = false;
+                return;
+            }
 
             let savedCount = 0;
-            let skippedCount = 0;
-            let totalChunks = 0;
+            let removedCount = 0;
+            const model = resolveEmbeddingModel(this.settings);
+            const { scheme } = getSettingsFingerprint(this.settings);
 
-            for (const [path, chunkEmbeddings] of this.chunkEmbeddingsCache) {
-                const file = this.vault.getAbstractFileByPath(path) as TFile;
+            for (const path of removed) {
+                if (this.chunkEmbeddingsCache.has(path)) {
+                    // Re-indexed since removal; the dirty set will write it.
+                    continue;
+                }
+                // eslint-disable-next-line no-await-in-loop
+                await this.embeddingStore.deleteFile(path);
+                removedCount++;
+            }
+
+            for (const path of dirty) {
+                const chunkEmbeddings = this.chunkEmbeddingsCache.get(path);
+                const file = this.vault.getAbstractFileByPath(path);
                 const metadata = this.cacheMetadata.get(path);
 
-                if (!file) {
-                    logger.debug(`Semantic search: File ${path} no longer exists, skipping cache save`);
-                    skippedCount++;
+                if (!chunkEmbeddings || !(file instanceof TFile) || !metadata) {
+                    // eslint-disable-next-line no-await-in-loop
+                    await this.embeddingStore.deleteFile(path);
+                    removedCount++;
                     continue;
                 }
 
-                if (!metadata) {
-                    logger.debug(`Semantic search: No metadata for ${path}, skipping cache save`);
-                    skippedCount++;
-                    continue;
-                }
-
-                // Convert chunk embeddings to serializable format
                 const chunks: ChunkEmbedding[] = chunkEmbeddings.map((chunk) => ({
                     embedding: Array.from(chunk.embedding), // Convert Float32Array to regular array
                     text: chunk.text,
                     startLine: chunk.startLine,
                 }));
 
-                cache.embeddings[path] = {
+                // eslint-disable-next-line no-await-in-loop
+                await this.embeddingStore.saveFile(path, {
                     lastModified: metadata.lastModified,
                     contentHash: metadata.contentHash,
                     chunks,
-                };
+                }, model, this.expectedDimension, scheme);
                 savedCount++;
-                totalChunks += chunks.length;
-                logger.debug(`Semantic search: Prepared ${path} for cache save (${chunks.length} chunks)`);
             }
 
-            logger.debug(`Semantic search: Writing cache file with ${savedCount} files (${totalChunks} chunks, ${skippedCount} skipped) to ${this.cacheFile}`);
+            await this.embeddingStore.saveMetadata({
+                version: CACHE_FORMAT_VERSION,
+                lastUpdated: Date.now(),
+                model,
+                dimension: this.expectedDimension,
+                scheme,
+            });
 
-            await this.vault.adapter.write(this.cacheFile, JSON.stringify(cache));
-            logger.debug(`Semantic search: Successfully saved ${savedCount} files to cache file`);
-
-            // Verify the file was created
-            const exists = await this.vault.adapter.exists(this.cacheFile);
-            logger.debug(`Semantic search: Cache file exists after write: ${exists}`);
-            if (exists) {
-                const stat = await this.vault.adapter.stat(this.cacheFile);
-                logger.debug(`Semantic search: Cache file size: ${stat?.size} bytes`);
+            if (savedCount > 0 || removedCount > 0 || this.migratedLegacyCache) {
+                logger.debug(`Semantic search: Saved ${savedCount} dirty embedding records, removed ${removedCount}`);
             }
+            this.migratedLegacyCache = false;
         } catch (error) {
+            // Restore marks so the next save retries them.
+            dirty.forEach((path) => this.dirtyFilePaths.add(path));
+            removed.forEach((path) => {
+                if (!this.chunkEmbeddingsCache.has(path)) {
+                    this.removedFilePaths.add(path);
+                }
+            });
             logger.error('Semantic search: Error saving embedding cache:', error);
-            logger.error('Semantic search: Cache file path:', this.cacheFile);
-            logger.error('Semantic search: Error details:', error);
         }
     }
 
-    private async getContentHash(file: TFile): Promise<string> {
-        const content = await this.vault.cachedRead(file);
-        return generateContentHashBase36(content);
+    private async saveLegacyJsonCache(): Promise<void> {
+        logger.debug(`Semantic search: IndexedDB unavailable, saving legacy cache with ${this.chunkEmbeddingsCache.size} files`);
+
+        const cache: EmbeddingCache = {
+            version: CACHE_FORMAT_VERSION,
+            lastUpdated: Date.now(),
+            model: resolveEmbeddingModel(this.settings),
+            dimension: this.expectedDimension,
+            embeddings: {},
+        };
+
+        for (const [path, chunkEmbeddings] of this.chunkEmbeddingsCache) {
+            const metadata = this.cacheMetadata.get(path);
+            if (!metadata) {
+                continue;
+            }
+
+            cache.embeddings[path] = {
+                lastModified: metadata.lastModified,
+                contentHash: metadata.contentHash,
+                chunks: chunkEmbeddings.map((chunk) => ({
+                    embedding: Array.from(chunk.embedding),
+                    text: chunk.text,
+                    startLine: chunk.startLine,
+                })),
+            };
+        }
+
+        await this.vault.adapter.write(this.cacheFile, JSON.stringify(cache));
+    }
+
+    /** Queue a store wipe behind any in-progress save so it cannot be overwritten by stale data. */
+    private enqueueStoreClear(): void {
+        this.saveChain = this.saveChain
+            .then(() => this.embeddingStore.clear())
+            .catch((error) => {
+                logger.warn('Semantic search: Failed to clear embedding store:', error);
+            });
     }
 
     /**
@@ -343,65 +771,152 @@ export class EmbeddingService {
         return rawSentences.filter((s) => s.length > 10);
     }
 
+    private isAbortError(error: unknown): boolean {
+        return isAbortError(error);
+    }
+
+    private throwIfAborted(signal?: AbortSignal): void {
+        throwIfAborted(signal);
+    }
+
+    // --- Provider management ---
+
+    /** Current embedding provider, created on first use from the settings. */
+    getProvider(): EmbeddingProvider {
+        if (!this.provider) {
+            this.provider = this.providerFactory(this.settings, this.providerContext);
+            this.providerConfigKey = getProviderConfigKey(this.settings);
+            this.lastAvailability = undefined;
+            this.providerStatusUnsubscribe = this.provider.onStatusChange((status) => this.emitProviderStatus(status));
+            this.applyProviderConcurrency();
+            logger.debug(`Semantic search: Using embedding provider ${this.provider.label}`);
+            this.emitProviderStatus(this.provider.getStatus());
+        }
+        return this.provider;
+    }
+
+    private disposeProvider(): void {
+        const { provider } = this;
+        if (!provider) {
+            return;
+        }
+        this.providerStatusUnsubscribe?.();
+        this.providerStatusUnsubscribe = undefined;
+        this.provider = undefined;
+        this.providerConfigKey = undefined;
+        this.lastAvailability = undefined;
+        provider.dispose();
+        this.emitProviderStatus({ state: 'idle', message: 'Model not loaded yet' });
+    }
+
+    /** Status of the current provider (model download/loading, readiness, errors). */
+    getProviderStatus(): ProviderStatus {
+        return this.provider?.getStatus() ?? { state: 'idle', message: 'Model not loaded yet' };
+    }
+
+    /** Subscribe to provider status; survives provider replacement. Returns an unsubscribe function. */
+    onProviderStatusChange(listener: ProviderStatusListener): () => void {
+        this.providerStatusListeners.add(listener);
+        return () => {
+            this.providerStatusListeners.delete(listener);
+        };
+    }
+
+    private emitProviderStatus(status: ProviderStatus): void {
+        this.providerStatusListeners.forEach((listener) => {
+            try {
+                listener(status);
+            } catch (error) {
+                logger.warn('Semantic search: Provider status listener failed:', error);
+            }
+        });
+    }
+
+    /** Start loading the provider's model in the background (no-op for remote providers). */
+    async warmup(): Promise<void> {
+        if (this.closed) {
+            return;
+        }
+        await this.getProvider().warmup?.();
+    }
+
+    /**
+     * File-level indexing concurrency: the provider's ceiling (local models run one
+     * batch at a time) or the user setting. Adaptive throttling only for providers
+     * where response times reflect server load.
+     */
+    private applyProviderConcurrency(): void {
+        const provider = this.provider;
+        const userMax = Math.max(1, this.settings.maxConcurrentRequests || 1);
+        const limit = provider?.maxConcurrency !== undefined ? provider.maxConcurrency : userMax;
+        const adaptive = (this.settings.enableAdaptiveThrottling ?? true) && (provider?.supportsAdaptiveThrottling ?? true);
+        this.requestQueue.updateConcurrentLimit(limit);
+        // Disabling adaptive throttling also restores the full limit
+        this.requestQueue.setAdaptiveThrottling(adaptive);
+    }
+
+    private toEmbeddingKind(taskType: 'search_document' | 'search_query'): EmbeddingKind {
+        return taskType === 'search_query' ? 'query' : 'document';
+    }
 
     async generateEmbedding(
         text: string,
-        _taskType: 'search_document' | 'search_query' = 'search_document',
+        taskType: 'search_document' | 'search_query' = 'search_document',
         retries = 3,
+        options: EmbeddingRequestOptions = {},
     ): Promise<Float32Array> {
+        const [vector] = await this.generateEmbeddings([text], taskType, retries, options);
+        if (!vector) {
+            throw new Error('Embedding provider returned no vector');
+        }
+        return vector;
+    }
+
+    /**
+     * Embed several texts with one provider call. Vectors are normalized; the first
+     * vector of a generation defines the expected dimension.
+     */
+    async generateEmbeddings(
+        texts: string[],
+        taskType: 'search_document' | 'search_query' = 'search_document',
+        retries = 3,
+        options: EmbeddingRequestOptions = {},
+    ): Promise<Float32Array[]> {
         // NOTE: Do not wrap this in requestQueue.add() - the queue is managed at the file level
         // in indexAllFiles to avoid deadlocks from nested queue entries
-        for (let attempt = 1; attempt <= retries; attempt++) {
-            try {
-                // Use Ollama's /api/embeddings endpoint with 'prompt' field
-                const response = await requestUrl({
-                    url: `${this.settings.ollamaUrl}/api/embeddings`,
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        model: this.settings.embeddingModel || this.defaultModelId,
-                        prompt: text, // Ollama uses 'prompt', not 'input'
-                    }),
-                });
+        this.throwIfAborted(options.signal);
+        if (this.closed) {
+            throw createAbortError('Embedding service closed');
+        }
 
-                if (response.status !== 200) {
-                    throw new Error(`HTTP ${response.status}: ${response.text}`);
-                }
+        const timeoutMs = Math.max(500, options.timeoutMs ?? this.settings.searchTimeoutMs ?? 8000);
+        const generationAtStart = this.generation;
+        const rawVectors = await this.getProvider().embed(texts, this.toEmbeddingKind(taskType), {
+            signal: options.signal,
+            timeoutMs,
+            retries,
+        });
 
-                // Ollama /api/embeddings returns { embedding: number[] }
-                const data = response.json as any;
-                const rawEmbedding: number[] | undefined = Array.isArray(data?.embedding)
-                    ? (data.embedding as number[])
-                    : undefined;
+        if (rawVectors.length !== texts.length) {
+            throw new Error(`Embedding provider returned ${rawVectors.length} vectors for ${texts.length} inputs`);
+        }
 
-                if (!rawEmbedding || rawEmbedding.length === 0) {
-                    const snippet = typeof response.text === 'string' ? response.text.slice(0, 200) : '';
-                    console.error(
-                        `[Semantic Search] Invalid embedding response (missing/empty vector). Status: ${response.status}. Body snippet: ${snippet}`,
-                    );
-                    throw new Error('Invalid embedding response: missing or empty embedding');
-                }
-
-                const vec = new Float32Array(rawEmbedding);
-                if (this.expectedDimension === undefined) {
+        return rawVectors.map((raw) => {
+            if (raw.length === 0) {
+                throw new Error('Invalid embedding response: missing or empty embedding');
+            }
+            const vec = this.normalizeVector(raw);
+            if (this.expectedDimension === undefined) {
+                // Do not let a response from before an invalidation define the new dimension
+                if (generationAtStart === this.generation) {
                     this.expectedDimension = vec.length;
                     logger.debug(`[Semantic Search] Set expected embedding dimension to ${this.expectedDimension}`);
-                } else if (this.expectedDimension !== vec.length) {
-                    console.warn(`[Semantic Search] Generated embedding dimension ${vec.length} differs from expected ${this.expectedDimension}`);
                 }
-                return vec;
-            } catch (error) {
-                console.warn(`[Semantic Search] Embedding attempt ${attempt}/${retries} failed:`, error);
-
-                if (attempt === retries) {
-                    const errorMessage = error instanceof Error ? error.message : String(error);
-                    throw new Error(`Failed after ${retries} attempts: ${errorMessage}`);
-                }
-                // Exponential backoff
-                await new Promise((resolve) => setTimeout(resolve, 2 ** attempt * 1000));
+            } else if (this.expectedDimension !== vec.length) {
+                logger.warn(`[Semantic Search] Generated embedding dimension ${vec.length} differs from expected ${this.expectedDimension}`);
             }
-        }
-        throw new Error('Unexpected error in embedding generation');
+            return vec;
+        });
     }
 
     /**
@@ -409,12 +924,8 @@ export class EmbeddingService {
    */
     public shouldExcludeFile(file: TFile): boolean {
         if (!this.settings.excludePatterns || this.settings.excludePatterns.length === 0) {
-            logger.debug(`Semantic search: No exclusion patterns configured for ${file.path}`);
             return false;
         }
-
-        logger.debug(`Semantic search: Checking exclusion patterns for ${file.path}`);
-        logger.debug(`Semantic search: Available patterns: [${this.settings.excludePatterns.join(', ')}]`);
 
         // Check if file path matches any exclusion pattern
         return this.settings.excludePatterns.some((pattern) => {
@@ -444,15 +955,7 @@ export class EmbeddingService {
                 }
 
                 const regex = new RegExp(regexPattern);
-                const matches = regex.test(file.path);
-
-                logger.debug(`Semantic search: Pattern "${pattern}" -> Regex "${regexPattern}" -> Match: ${matches} for ${file.path}`);
-
-                if (matches) {
-                    logger.debug(`Semantic search: File ${file.path} excluded by pattern: ${pattern}`);
-                }
-
-                return matches;
+                return regex.test(file.path);
             } catch (e) {
                 logger.warn(`Semantic search: Invalid exclusion pattern: ${pattern}`, e);
                 return false;
@@ -460,123 +963,290 @@ export class EmbeddingService {
         });
     }
 
-    async indexFile(file: TFile): Promise<void> {
-        try {
-            // Skip excluded files
-            if (this.shouldExcludeFile(file)) {
-                return;
+    private getMaxFileSize(): number {
+        return Math.max(0, this.settings.maxFileSize ?? 512 * 1024);
+    }
+
+    private getMaxIndexedFiles(): number {
+        return Math.max(0, this.settings.maxIndexedFiles ?? 2000);
+    }
+
+    public canIndexFile(file: TFile): boolean {
+        if (this.shouldExcludeFile(file)) {
+            return false;
+        }
+
+        const maxFileSize = this.getMaxFileSize();
+        if (maxFileSize > 0 && file.stat.size > maxFileSize) {
+            return false;
+        }
+
+        return true;
+    }
+
+    private getIndexableMarkdownFiles(markdownFiles = this.vault.getMarkdownFiles()): TFile[] {
+        const sortedFiles = [...markdownFiles]
+            .filter((file) => this.canIndexFile(file))
+            .sort((a, b) => a.path.localeCompare(b.path));
+        const maxIndexedFiles = this.getMaxIndexedFiles();
+
+        if (maxIndexedFiles <= 0) {
+            return sortedFiles;
+        }
+
+        return sortedFiles.slice(0, maxIndexedFiles);
+    }
+
+    private pruneCachedFilesOutsideActiveSet(activePaths: Set<string>): number {
+        let prunedCount = 0;
+
+        for (const filePath of this.chunkEmbeddingsCache.keys()) {
+            if (!activePaths.has(filePath)) {
+                this.removeFromCache(filePath);
+                prunedCount++;
             }
+        }
+
+        return prunedCount;
+    }
+
+    /**
+     * Files within the indexing guardrails that are missing from the index or whose
+     * cached vectors are older than the file.
+     */
+    getFilesNeedingIndex(): TFile[] {
+        return this.getIndexableMarkdownFiles().filter((file) => {
+            const cached = this.cacheMetadata.get(file.path);
+            return !cached || !this.isFileUpToDate(file, cached);
+        });
+    }
+
+    /** Drop cached entries outside the current guardrails (exclusions, size, max files). */
+    pruneInactiveEntries(): number {
+        const activePaths = new Set(this.getIndexableMarkdownFiles().map((file) => file.path));
+        return this.pruneCachedFilesOutsideActiveSet(activePaths);
+    }
+
+    /**
+     * Register a callback for files that changed while they were being embedded
+     * (or otherwise ended up stale after indexing) so they can be re-queued.
+     */
+    setStaleFileListener(listener?: (file: TFile) => void): void {
+        this.staleFileListener = listener;
+    }
+
+    /**
+     * Index a single file. Concurrent calls for the same path share one run; if the
+     * file changed while it was being embedded, the stale-file listener is notified.
+     */
+    async indexFile(file: TFile, options: SemanticIndexingOptions = {}): Promise<IndexFileResult> {
+        const inFlight = this.inFlightIndexing.get(file.path);
+        if (inFlight) {
+            return inFlight;
+        }
+
+        const run = this.indexFileInternal(file, options);
+        this.inFlightIndexing.set(file.path, run);
+
+        try {
+            const result = await run;
+            this.notifyIfStale(file);
+            return result;
+        } finally {
+            if (this.inFlightIndexing.get(file.path) === run) {
+                this.inFlightIndexing.delete(file.path);
+            }
+        }
+    }
+
+    private notifyIfStale(file: TFile): void {
+        if (this.closed || !this.staleFileListener) {
+            return;
+        }
+
+        const metadata = this.cacheMetadata.get(file.path);
+        if (metadata && !this.isFileUpToDate(file, metadata)) {
+            logger.debug(`Semantic search: ${file.path} changed during indexing, re-queueing`);
+            this.staleFileListener(file);
+        }
+    }
+
+    private async indexFileInternal(file: TFile, options: SemanticIndexingOptions): Promise<IndexFileResult> {
+        try {
+            this.throwIfAborted(options.signal);
+
+            // Skip excluded files, and don't mix vectors from a model change that isn't applied yet
+            if (!this.canIndexFile(file) || this.hasPendingModelChange()) {
+                return 'skipped';
+            }
+
+            const generationAtStart = this.generation;
+            // Capture mtime before reading so edits made while embedding are detected afterwards
+            const mtimeAtStart = file.stat.mtime;
 
             // Check if file is already up-to-date
             const existingMetadata = this.cacheMetadata.get(file.path);
-            if (existingMetadata && this.isFileUpToDate(file, existingMetadata)) {
-                return;
+            if (existingMetadata && mtimeAtStart <= existingMetadata.lastModified) {
+                return 'unchanged';
             }
 
-            // Get content hash for change detection
-            const contentHash = await this.getContentHash(file);
+            const content = await this.vault.cachedRead(file);
+            this.throwIfAborted(options.signal);
+            if (generationAtStart !== this.generation) {
+                return 'skipped';
+            }
 
             // Check if content actually changed
-            if (existingMetadata && existingMetadata.contentHash === contentHash) {
+            const contentHash = generateContentHashBase36(content);
+            if (existingMetadata && existingMetadata.contentHash === contentHash
+                && this.chunkEmbeddingsCache.has(file.path)) {
                 this.cacheMetadata.set(file.path, {
-                    lastModified: file.stat.mtime,
-                    contentHash: existingMetadata.contentHash,
+                    lastModified: mtimeAtStart,
+                    contentHash,
                 });
-                return;
+                // Persist the new mtime, otherwise the record looks stale after restart
+                this.markDirty(file.path);
+                return 'unchanged';
             }
 
-            // Read and chunk the document
-            const content = await this.vault.cachedRead(file);
-
             if (!content || content.trim().length === 0) {
-                return;
+                if (this.chunkEmbeddingsCache.has(file.path)) {
+                    // Note was emptied: its old vectors no longer describe it
+                    this.removeFromCache(file.path);
+                }
+                return 'skipped';
             }
 
             const chunks = this.chunkDocument(content, file);
 
             if (chunks.length === 0 || (chunks.length === 1 && chunks[0]?.trim().length === 0)) {
-                return;
+                return 'skipped';
             }
 
-            // Generate embeddings for all chunks (store each one, not averaged!)
+            // Generate embeddings for all chunks (store each one, not averaged!).
+            // Chunks are sent in provider-sized batches (1 for Ollama, several for local models).
             const chunkEmbeddings: ChunkEmbeddingRuntime[] = [];
+            const texts = chunks.filter((chunkText): chunkText is string => !!chunkText);
+            const batchSize = Math.max(1, this.getProvider().maxBatchSize);
 
-            for (let i = 0; i < chunks.length; i++) {
-                const chunkText = chunks[i];
-                if (!chunkText) {
-                    continue;
-                }
+            for (let start = 0; start < texts.length; start += batchSize) {
+                const batch = texts.slice(start, start + batchSize);
+                const batchLabel = batch.length === 1
+                    ? `chunk ${start + 1}`
+                    : `chunks ${start + 1}-${start + batch.length}`;
 
                 try {
-                    const embedding = await this.generateEmbedding(chunkText, 'search_document');
+                    this.throwIfAborted(options.signal);
+                    // eslint-disable-next-line no-await-in-loop
+                    const embeddings = await this.generateEmbeddings(batch, 'search_document', 3, {
+                        signal: options.signal,
+                        timeoutMs: this.settings.indexingRequestTimeoutMs ?? 30000,
+                    });
 
-                    // Initialize expected dimension if needed
-                    if (this.expectedDimension === undefined) {
-                        this.expectedDimension = embedding.length;
+                    if (generationAtStart !== this.generation) {
+                        logger.debug(`Semantic search: Embeddings invalidated while indexing ${file.path}, discarding`);
+                        return 'skipped';
                     }
 
-                    // Validate dimension
-                    if (this.expectedDimension !== embedding.length) {
-                        console.warn(`[Semantic Search] Dimension mismatch for chunk ${i + 1} of ${file.path}: got ${embedding.length}, expected ${this.expectedDimension}`);
-                        continue;
-                    }
+                    embeddings.forEach((embedding, offset) => {
+                        // Initialize expected dimension if needed
+                        if (this.expectedDimension === undefined) {
+                            this.expectedDimension = embedding.length;
+                        }
 
-                    chunkEmbeddings.push({
-                        embedding,
-                        text: chunkText,
-                        // Could calculate startLine here from content if needed
+                        // Validate dimension
+                        if (this.expectedDimension !== embedding.length) {
+                            logger.warn(`[Semantic Search] Dimension mismatch for chunk ${start + offset + 1} of ${file.path}: got ${embedding.length}, expected ${this.expectedDimension}`);
+                            return;
+                        }
+
+                        chunkEmbeddings.push({
+                            embedding,
+                            text: batch[offset]!,
+                            // Could calculate startLine here from content if needed
+                        });
                     });
                 } catch (error) {
-                    console.error(`[Semantic Search] Failed to generate embedding for chunk ${i + 1} of ${file.path}:`, error);
+                    if (this.isAbortError(error) || error instanceof NonRetryableEmbeddingError) {
+                        // Abort, or a request error that every remaining chunk would hit too
+                        throw error;
+                    }
+                    logger.error(`[Semantic Search] Failed to generate embedding for ${batchLabel} of ${file.path}:`, error);
                 }
+            }
+
+            if (generationAtStart !== this.generation) {
+                return 'skipped';
             }
 
             if (chunkEmbeddings.length === 0) {
-                console.warn(`[Semantic Search] No embeddings generated for ${file.path}`);
-                return;
+                logger.warn(`[Semantic Search] No embeddings generated for ${file.path}`);
+                return 'skipped';
             }
 
             // Store all chunk embeddings for this file (not averaged!)
             this.chunkEmbeddingsCache.set(file.path, chunkEmbeddings);
             this.cacheMetadata.set(file.path, {
-                lastModified: file.stat.mtime,
+                lastModified: mtimeAtStart,
                 contentHash,
             });
+            this.fileCentroidCache.set(file.path, this.computeCentroid(chunkEmbeddings));
+            this.markDirty(file.path);
+            this.bumpIndexVersion();
 
             logger.debug(`Semantic search: Indexed ${file.path} with ${chunkEmbeddings.length} chunks`);
+            return 'indexed';
         } catch (error) {
-            console.error(`[Semantic Search] Error indexing file ${file.path}:`, error);
+            if (this.isAbortError(error)) {
+                logger.debug(`Semantic search: Indexing aborted for ${file.path}`);
+                throw error;
+            }
+            logger.error(`[Semantic Search] Error indexing file ${file.path}:`, error);
             throw error;
         }
     }
 
 
-    async indexAllFiles(onProgress?: (current: number, total: number) => void): Promise<void> {
+    async indexAllFiles(
+        onProgress?: (current: number, total: number) => void,
+        options: SemanticIndexingOptions = {},
+    ): Promise<void> {
+        // A full index run is an explicit request to adopt the configured model
+        this.applyModelChange();
+        // Create the provider first so the queue runs at its concurrency
+        this.getProvider();
         const startTime = Date.now();
         const markdownFiles = this.vault.getMarkdownFiles();
+        const indexableFiles = this.getIndexableMarkdownFiles(markdownFiles);
+        const activePaths = new Set(indexableFiles.map((file) => file.path));
+        const prunedCount = this.pruneCachedFilesOutsideActiveSet(activePaths);
 
         logger.debug(`[Semantic Search] Starting index scan of ${markdownFiles.length} total markdown files...`);
+        if (indexableFiles.length !== markdownFiles.length) {
+            logger.debug(`[Semantic Search] Guardrails limited indexing to ${indexableFiles.length}/${markdownFiles.length} markdown files`);
+        }
+        if (prunedCount > 0) {
+            logger.debug(`[Semantic Search] Pruned ${prunedCount} cached files outside current semantic indexing guardrails`);
+        }
 
-        const filesToIndex = markdownFiles.filter((file) => {
-            // Skip excluded files
-            if (this.shouldExcludeFile(file)) {
-                return false;
-            }
-
+        const filesToIndex = indexableFiles.filter((file) => {
             const cached = this.cacheMetadata.get(file.path);
             const needsReindex = !cached || !this.isFileUpToDate(file, cached);
             return needsReindex;
         });
 
-        const cachedCount = this.chunkEmbeddingsCache.size;
-        const excludedCount = markdownFiles.length - filesToIndex.length - cachedCount;
+        const cachedCount = indexableFiles.length - filesToIndex.length;
+        const skippedByGuardrails = markdownFiles.length - indexableFiles.length;
         const stats = this.requestQueue.getStats();
 
-        logger.debug(`[Semantic Search] Files to index: ${filesToIndex.length} (${cachedCount} cached, ${excludedCount} excluded)`);
+        logger.debug(`[Semantic Search] Files to index: ${filesToIndex.length} (${cachedCount} cached, ${skippedByGuardrails} skipped by guardrails)`);
         logger.debug(`[Semantic Search] Concurrency: ${stats.currentConcurrency}/${stats.userMax} (adaptive: ${this.settings.enableAdaptiveThrottling ?? true})`);
 
         if (filesToIndex.length === 0) {
             logger.debug('[Semantic Search] All files are already indexed or excluded, nothing to do');
+            if (prunedCount > 0) {
+                await this.saveCache();
+            }
             return;
         }
 
@@ -585,37 +1255,67 @@ export class EmbeddingService {
         let processedCount = 0;
         let errorCount = 0;
         const saveInterval = 10; // Save cache every N files
+        let nextFileIndex = 0;
+        const workerCount = Math.max(
+            1,
+            Math.min(filesToIndex.length, this.requestQueue.getCurrentConcurrency()),
+        );
 
         // Process files in parallel using the request queue
         // The queue handles concurrency limits and adaptive throttling
-        const indexPromises = filesToIndex.map((file) => this.requestQueue.add(async () => {
-            try {
-                const fileStartTime = Date.now();
-                await this.indexFile(file);
-                const fileTime = Date.now() - fileStartTime;
+        const indexPromises = Array.from({ length: workerCount }, () => this.requestQueue.add(async () => {
+            while (nextFileIndex < filesToIndex.length) {
+                this.throwIfAborted(options.signal);
 
-                processedCount++;
-                const queueStats = this.requestQueue.getStats();
-                logger.debug(`[Semantic Search] Indexed ${processedCount}/${filesToIndex.length}: ${file.path} (${fileTime}ms, concurrency: ${queueStats.currentConcurrency})`);
+                const file = filesToIndex[nextFileIndex];
+                nextFileIndex++;
 
-                if (onProgress) {
-                    onProgress(processedCount, filesToIndex.length);
+                if (!file) {
+                    continue;
                 }
 
-                // Periodically save cache to avoid losing progress
-                if (processedCount % saveInterval === 0) {
-                    await this.saveCache().catch((error) => {
-                        logger.warn('Semantic search: Failed to save intermediate cache:', error);
-                    });
+                try {
+                    const fileStartTime = Date.now();
+                    await this.indexFile(file, options);
+                    const fileTime = Date.now() - fileStartTime;
+
+                    processedCount++;
+                    const queueStats = this.requestQueue.getStats();
+                    logger.debug(`[Semantic Search] Indexed ${processedCount}/${filesToIndex.length}: ${file.path} (${fileTime}ms, concurrency: ${queueStats.currentConcurrency})`);
+
+                    if (onProgress) {
+                        onProgress(processedCount, filesToIndex.length);
+                    }
+
+                    // Periodically save cache to avoid losing progress
+                    if (processedCount % saveInterval === 0) {
+                        await this.saveCache().catch((error) => {
+                            logger.warn('Semantic search: Failed to save intermediate cache:', error);
+                        });
+                    }
+                } catch (error) {
+                    if (this.isAbortError(error)) {
+                        throw error;
+                    }
+                    errorCount++;
+                    logger.error(`Semantic search: Failed to index ${file.path}:`, error);
                 }
-            } catch (error) {
-                errorCount++;
-                logger.error(`Semantic search: Failed to index ${file.path}:`, error);
             }
         }));
 
         // Wait for all files to be processed
-        await Promise.all(indexPromises);
+        try {
+            await Promise.all(indexPromises);
+        } catch (error) {
+            if (this.isAbortError(error)) {
+                logger.info(`[Semantic Search] Indexing cancelled after ${processedCount}/${filesToIndex.length} files`);
+                await this.saveCache().catch((saveError) => {
+                    logger.warn('Semantic search: Failed to save cache after cancellation:', saveError);
+                });
+                throw error;
+            }
+            throw error;
+        }
 
         // Final cache save
         await this.saveCache();
@@ -626,27 +1326,30 @@ export class EmbeddingService {
         logger.debug(`[Semantic Search] Final concurrency: ${finalStats.currentConcurrency}/${finalStats.userMax}, avg response: ${finalStats.avgResponseTime.toFixed(0)}ms`);
     }
 
+    /**
+     * Whether the configured provider can produce embeddings right now. For the local
+     * provider this loads (and on first use downloads) the model. The explanation is
+     * available from getAvailabilityMessage().
+     */
     async checkConnection(): Promise<boolean> {
-        try {
-            logger.debug(`[Semantic Search] Checking connection to ${this.settings.ollamaUrl}/api/tags...`);
-            const response = await requestUrl({
-                url: `${this.settings.ollamaUrl}/api/tags`,
-                method: 'GET',
-            });
-
-            const data = response.json as { models: Array<{ name: string }> };
-            const modelName = this.settings.embeddingModel || this.defaultModelId;
-            const availableModels = data.models.map((m) => m.name);
-            logger.debug(`[Semantic Search] Available models: ${availableModels.join(', ')}`);
-            logger.debug(`[Semantic Search] Looking for model: ${modelName}`);
-
-            const found = data.models.some((model) => model.name.includes(modelName));
-            logger.debug(`[Semantic Search] Model found: ${found}`);
-            return found;
-        } catch (error) {
-            console.error('[Semantic Search] Connection check failed:', error);
+        if (this.closed) {
             return false;
         }
+        const provider = this.getProvider();
+        const availability = await provider.checkAvailability();
+        // Ignore results for a provider that was replaced while checking
+        if (this.provider === provider) {
+            this.lastAvailability = availability;
+        }
+        if (!availability.ok) {
+            logger.warn(`[Semantic Search] Embedding provider unavailable: ${availability.message}`);
+        }
+        return availability.ok;
+    }
+
+    /** Explanation from the most recent checkConnection(), if any. */
+    getAvailabilityMessage(): string | undefined {
+        return this.lastAvailability?.message;
     }
 
     cosineSimilarity(a: Float32Array, b: Float32Array): number {
@@ -656,8 +1359,12 @@ export class EmbeddingService {
         }
 
         let dotProduct = 0;
-        let normA = 0;
-        let normB = 0;
+        const normA = this.computeVectorNorm(a);
+        const normB = this.computeVectorNorm(b);
+
+        if (normA === 0 || normB === 0) {
+            return 0;
+        }
 
         for (let i = 0; i < a.length; i++) {
             const aValue = a[i];
@@ -665,16 +1372,10 @@ export class EmbeddingService {
 
             if (aValue !== undefined && bValue !== undefined) {
                 dotProduct += aValue * bValue;
-                normA += aValue * aValue;
-                normB += bValue * bValue;
             }
         }
 
-        if (normA === 0 || normB === 0) {
-            return 0;
-        }
-
-        return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
+        return dotProduct / (normA * normB);
     }
 
     /**
@@ -683,6 +1384,53 @@ export class EmbeddingService {
      */
     getChunkEmbeddings(filePath: string): ChunkEmbeddingRuntime[] | undefined {
         return this.chunkEmbeddingsCache.get(filePath);
+    }
+
+    getFileCentroid(filePath: string): Float32Array | undefined {
+        return this.fileCentroidCache.get(filePath);
+    }
+
+    getIndexedFilePaths(): string[] {
+        return Array.from(this.chunkEmbeddingsCache.keys());
+    }
+
+    getCandidateFilePaths(
+        queryEmbedding: Float32Array,
+        maxCandidates: number,
+        threshold = 0,
+        signal?: AbortSignal,
+    ): string[] {
+        const scored: Array<{ path: string; similarity: number }> = [];
+        const candidateThreshold = Math.max(0, threshold * 0.5);
+
+        for (const [path, centroid] of this.fileCentroidCache) {
+            if (signal?.aborted) {
+                break;
+            }
+
+            if (centroid.length !== queryEmbedding.length) {
+                continue;
+            }
+
+            const similarity = this.cosineSimilarity(queryEmbedding, centroid);
+            if (similarity >= candidateThreshold) {
+                scored.push({ path, similarity });
+            }
+        }
+
+        if (scored.length === 0 && this.fileCentroidCache.size > 0) {
+            for (const path of this.fileCentroidCache.keys()) {
+                scored.push({ path, similarity: 0 });
+                if (scored.length >= maxCandidates) {
+                    break;
+                }
+            }
+        }
+
+        return scored
+            .sort((a, b) => b.similarity - a.similarity)
+            .slice(0, maxCandidates)
+            .map((item) => item.path);
     }
 
     /**
@@ -725,24 +1473,139 @@ export class EmbeddingService {
         };
     }
 
-    clearCache(): void {
-        this.chunkEmbeddingsCache.clear();
-        this.cacheMetadata.clear();
-        this.expectedDimension = undefined;
+    cancelPendingRequests(reason = 'Semantic indexing cancelled'): void {
+        this.requestQueue.clear(reason);
     }
 
-    removeFromCache(filePath: string): void {
-        this.chunkEmbeddingsCache.delete(filePath);
-        this.cacheMetadata.delete(filePath);
+    /** Monotonic counter that changes whenever indexed vectors change. */
+    getIndexVersion(): number {
+        return this.indexVersion;
+    }
+
+    /** Key identifying the current embedding space (model + input scheme). */
+    getModelFingerprintKey(): string {
+        return fingerprintKey(getSettingsFingerprint(this.settings));
     }
 
     /**
-    * Update settings for the embedding service
-    */
-    updateSettings(newSettings: SemanticSearchSettings): void {
+     * Returns true once if cached vectors were discarded on load because they were built
+     * with a different model/scheme, meaning a rebuild is needed regardless of auto-index settings.
+     */
+    consumeLoadInvalidation(): boolean {
+        const invalidated = this.invalidatedOnLoad;
+        this.invalidatedOnLoad = false;
+        return invalidated;
+    }
+
+    clearCache(): void {
+        this.cancelPendingRequests('Semantic cache cleared');
+        this.invalidateAllEmbeddings('cache cleared');
+    }
+
+    /**
+     * Drop every vector (memory and storage). In-flight indexing started before this
+     * call is discarded when it completes.
+     */
+    private invalidateAllEmbeddings(reason: string): void {
+        logger.info(`Semantic search: Invalidating all embeddings (${reason})`);
+        this.generation++;
+        this.chunkEmbeddingsCache.clear();
+        this.cacheMetadata.clear();
+        this.fileCentroidCache.clear();
+        this.vectorNormCache = new WeakMap<Float32Array, number>();
+        this.dirtyFilePaths.clear();
+        this.removedFilePaths.clear();
+        this.migratedLegacyCache = false;
+        this.expectedDimension = undefined;
+        this.bumpIndexVersion();
+        this.enqueueStoreClear();
+        this.enqueueLegacyJsonRemoval();
+    }
+
+    /** The per-vault legacy JSON cache would otherwise be re-loaded when IndexedDB is empty. */
+    private enqueueLegacyJsonRemoval(): void {
+        this.saveChain = this.saveChain
+            .then(async () => {
+                if (await this.vault.adapter.exists(this.cacheFile)) {
+                    await this.vault.adapter.remove(this.cacheFile);
+                }
+            })
+            .catch((error) => {
+                logger.warn('Semantic search: Failed to remove legacy embedding cache file:', error);
+            });
+    }
+
+    removeFromCache(filePath: string): void {
+        const existed = this.chunkEmbeddingsCache.delete(filePath);
+        this.cacheMetadata.delete(filePath);
+        this.fileCentroidCache.delete(filePath);
+        this.dirtyFilePaths.delete(filePath);
+        this.removedFilePaths.add(filePath);
+        if (existed) {
+            this.bumpIndexVersion();
+        }
+    }
+
+    /**
+     * True when the configured model/scheme differs from the one the cached vectors
+     * belong to. Search and indexing are paused until applyModelChange() runs.
+     */
+    hasPendingModelChange(): boolean {
+        return fingerprintKey(getSettingsFingerprint(this.settings)) !== this.activeFingerprintKey;
+    }
+
+    /**
+     * Drop vectors from the previous model and adopt the configured one. Deferred from
+     * updateSettings so a half-typed model name doesn't wipe the index.
+     * Returns true if vectors were invalidated.
+     */
+    applyModelChange(): boolean {
+        const nextFingerprintKey = fingerprintKey(getSettingsFingerprint(this.settings));
+        if (nextFingerprintKey === this.activeFingerprintKey) {
+            return false;
+        }
+
+        const previousFingerprintKey = this.activeFingerprintKey;
+        this.activeFingerprintKey = nextFingerprintKey;
+        this.invalidateAllEmbeddings(`embedding model changed: ${previousFingerprintKey} -> ${nextFingerprintKey}`);
+        return true;
+    }
+
+    /**
+     * Update settings for the embedding service.
+     * Returns true if the embedding model/scheme now differs from the cached vectors.
+     * Vectors are kept until applyModelChange() so reverting the model restores them.
+     */
+    updateSettings(newSettings: SemanticSearchSettings): boolean {
         this.settings = newSettings;
-        this.requestQueue.updateConcurrentLimit(newSettings.maxConcurrentRequests);
-        this.requestQueue.setAdaptiveThrottling(newSettings.enableAdaptiveThrottling ?? true);
+
+        if (this.provider && this.providerConfigKey !== getProviderConfigKey(newSettings)) {
+            // Provider, model, precision or device changed: stop the old worker/connection.
+            // In-flight requests are rejected as aborted; the next request creates the new provider.
+            logger.info(`Semantic search: Embedding provider settings changed (${this.providerConfigKey} -> ${getProviderConfigKey(newSettings)})`);
+            this.disposeProvider();
+        }
+
+        this.applyProviderConcurrency();
         logger.debug(`Semantic search: Settings updated - concurrency: ${newSettings.maxConcurrentRequests}, adaptive: ${newSettings.enableAdaptiveThrottling ?? true}`);
+
+        if (!this.hasPendingModelChange()) {
+            return false;
+        }
+
+        this.cancelPendingRequests('Embedding model changed');
+        this.bumpIndexVersion();
+        return true;
+    }
+
+    /** Stop all background work. Safe to call more than once; initialize() reopens. */
+    close(): void {
+        this.closed = true;
+        this.cancelScheduledSave();
+        this.staleFileListener = undefined;
+        this.requestQueue.clear('Embedding service closed');
+        this.disposeProvider();
+        this.embeddingStore.close();
+        this.embeddingStoreAvailable = false;
     }
 }

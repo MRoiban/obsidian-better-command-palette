@@ -1,6 +1,7 @@
-import { Plugin, Notice, TFile } from 'obsidian';
+import {
+    Plugin, Notice, TFile, EventRef,
+} from 'obsidian';
 
-import SuggestionsWorker from 'web-worker:./web-workers/suggestions-worker';
 import { OrderedSet, MacroCommand } from 'src/utils';
 import BetterCommandPaletteModal from 'src/palette';
 import { Match, UnsafeAppInterface } from 'src/types/types';
@@ -11,11 +12,17 @@ import { EnhancedSearchService } from './search/enhanced-search-service';
 import {
     EmbeddingService, SemanticSearchEngine, SemanticSearchModal, SemanticIndexingCoordinator,
 } from './search/semantic';
+import type { SemanticSearchSettings } from './search/semantic/types';
+import type { EmbeddingProviderId } from './search/semantic/providers/types';
+import { describeEmbeddingModel } from './search/semantic/embedding-fingerprint';
 import { HybridSearchService } from './search/hybrid/hybrid-search-service';
 import { FileUsageTracker } from './search/usage-tracker';
 import { LinkGraphService } from './search/link-graph-service';
+import { FileMatchCacheService } from './search/file-match-cache-service';
 import { QuickLinkModal } from './ui/quick-link-modal';
-import { logger, LogLevel } from './utils/logger';
+import { logger } from './utils/logger';
+import { SuggestionsWorkerFallback } from './web-workers/suggestions-worker-fallback';
+import SuggestionsWorker from 'web-worker:./web-workers/suggestions-worker';
 import './styles.scss';
 
 export default class BetterCommandPalettePlugin extends Plugin {
@@ -31,106 +38,77 @@ export default class BetterCommandPalettePlugin extends Plugin {
 
     searchService!: EnhancedSearchService;
 
-    // Semantic search components
-    embeddingService!: EmbeddingService;
+    fileMatchCache!: FileMatchCacheService;
 
-    semanticSearchEngine!: SemanticSearchEngine;
+    // Semantic search components (present only while semantic search is running)
+    embeddingService?: EmbeddingService;
 
-    semanticIndexingCoordinator!: SemanticIndexingCoordinator;
+    semanticSearchEngine?: SemanticSearchEngine;
+
+    semanticIndexingCoordinator?: SemanticIndexingCoordinator;
 
     // Hybrid search service
-    hybridSearchService!: HybridSearchService;
+    hybridSearchService?: HybridSearchService;
 
     usageTracker!: FileUsageTracker;
 
     // Link graph service for PageRank scoring
-    linkGraphService!: LinkGraphService;
+    linkGraphService?: LinkGraphService;
 
     // Last queries for preserve query functionality
     lastSemanticQuery: string = '';
 
     lastFileQuery: string = '';
 
+    private lightweightSettingsSaveTimer?: number;
+
+    private settingsSaveTimer?: number;
+
+    private linkGraphEventsRegistered = false;
+
+    private appliedSettingsSnapshot?: BetterCommandPalettePluginSettings;
+
+    /** Vault listeners owned by the semantic services; removed on shutdown. */
+    private semanticEventRefs: EventRef[] = [];
+
+    /** Serializes semantic start/stop so concurrent toggles cannot interleave. */
+    private semanticTransition: Promise<void> = Promise.resolve();
+
+    private semanticRibbonEl?: HTMLElement;
+
     async onload() {
-        // Enable verbose debug logging during development
-        logger.setLogLevel(LogLevel.DEBUG);
         logger.info('Loading plugin: Better Command Palette');
 
         await this.loadSettings();
 
         this.prevCommands = new OrderedSet<Match>();
         this.prevTags = new OrderedSet<Match>();
-        this.suggestionsWorker = new SuggestionsWorker({});
-
-        // Initialize enhanced search service
-        this.searchService = new EnhancedSearchService(this.app, this.settings.enhancedSearch);
+        this.suggestionsWorker = this.createSuggestionsWorker();
+        this.fileMatchCache = new FileMatchCacheService(this.app, this.settings);
+        this.fileMatchCache.initialize();
+        this.registerFileMatchCacheEvents();
+        this.registerHybridCacheEvents();
 
         // Initialize usage tracker (shared between services)
-        this.usageTracker = new FileUsageTracker();
+        this.usageTracker = new FileUsageTracker(this.app);
 
-        // Initialize link graph service (shared between services)
-        this.linkGraphService = new LinkGraphService(this.app, this.settings.linkGraph);
-        this.registerLinkGraphEvents();
+        // Initialize enhanced search service
+        this.searchService = new EnhancedSearchService(this.app, this.settings.enhancedSearch, this.usageTracker);
+
+        if (this.shouldUseLinkGraph()) {
+            this.ensureLinkGraphService();
+        }
 
         // Wait for workspace to be ready before initializing search services
         if (this.app.workspace.layoutReady) {
-            // If layout is already ready, initialize immediately
             logger.debug('Workspace layout already ready, initializing search services immediately');
-
-            // Start link graph computation
-            this.linkGraphService.recompute().catch((error) => {
-                logger.error('Failed to compute link graph:', error);
-            });
-
-            this.searchService.initialize().catch((error) => {
-                logger.error('Failed to initialize enhanced search service:', error);
-            });
-
-            // Initialize semantic search if enabled
-            if (this.settings.semanticSearch.enableSemanticSearch) {
-                logger.debug('Semantic search enabled, initializing immediately');
-                this.initializeSemanticSearch().then(() => {
-                    // Initialize hybrid search after semantic search is ready
-                    this.initializeHybridSearch();
-                }).catch((error) => {
-                    logger.error('Failed to initialize semantic search:', error);
-                    // Still initialize hybrid search without semantic
-                    this.initializeHybridSearch();
-                });
-            } else {
-                // Initialize hybrid search without semantic
-                this.initializeHybridSearch();
-            }
+            this.initializeWorkspaceServices();
         } else {
             // Otherwise wait for layout ready event
             logger.debug('Workspace layout not ready, waiting for layout-ready event before initializing search services');
             this.app.workspace.onLayoutReady(() => {
                 logger.debug('Workspace layout ready event received, initializing search services');
-
-                // Start link graph computation
-                this.linkGraphService.recompute().catch((error) => {
-                    logger.error('Failed to compute link graph:', error);
-                });
-
-                this.searchService.initialize().catch((error) => {
-                    logger.error('Failed to initialize enhanced search service:', error);
-                });
-
-                // Initialize semantic search if enabled
-                if (this.settings.semanticSearch.enableSemanticSearch) {
-                    logger.debug('Semantic search enabled, initializing after workspace ready');
-                    this.initializeSemanticSearch().then(() => {
-                        // Initialize hybrid search after semantic search is ready
-                        this.initializeHybridSearch();
-                    }).catch((error) => {
-                        logger.error('Failed to initialize semantic search:', error);
-                        // Still initialize hybrid search without semantic
-                        this.initializeHybridSearch();
-                    });
-                } else {
-                    // Initialize hybrid search without semantic
-                    this.initializeHybridSearch();
-                }
+                this.initializeWorkspaceServices();
             });
         }
 
@@ -150,6 +128,9 @@ export default class BetterCommandPalettePlugin extends Plugin {
                     this.suggestionsWorker,
                     this.searchService,
                     this.hybridSearchService,
+                    '',
+                    undefined,
+                    this.fileMatchCache,
                 ).open();
             },
         });
@@ -168,6 +149,8 @@ export default class BetterCommandPalettePlugin extends Plugin {
                     this.searchService,
                     this.hybridSearchService,
                     this.settings.fileSearchPrefix,
+                    undefined,
+                    this.fileMatchCache,
                 ).open();
             },
         });
@@ -186,6 +169,8 @@ export default class BetterCommandPalettePlugin extends Plugin {
                     this.searchService,
                     this.hybridSearchService,
                     this.settings.tagSearchPrefix,
+                    undefined,
+                    this.fileMatchCache,
                 ).open();
             },
         });
@@ -256,6 +241,7 @@ export default class BetterCommandPalettePlugin extends Plugin {
                         this.hybridSearchService,
                         '', // No prefix when opened directly via hotkey
                         ActionType.Hybrid, // Force hybrid mode
+                        this.fileMatchCache,
                     ).open();
                 } else {
                     new Notice('Hybrid search is not enabled or not initialized');
@@ -275,8 +261,8 @@ export default class BetterCommandPalettePlugin extends Plugin {
             id: 'clear-and-reindex-semantic-search',
             name: 'Clear semantic search cache and reindex',
             callback: async () => {
-                if (this.embeddingService) {
-                    this.embeddingService.clearCache();
+                if (this.semanticIndexingCoordinator) {
+                    await this.semanticIndexingCoordinator.clearIndex();
                     new Notice('Semantic search cache cleared. Starting reindex...');
                     await this.reindexSemanticSearch();
                 } else {
@@ -326,20 +312,77 @@ export default class BetterCommandPalettePlugin extends Plugin {
         });
 
         // Add ribbon icon for semantic search
-        if (this.settings.semanticSearch.enableSemanticSearch) {
-            this.addRibbonIcon('search', 'Open semantic search', () => {
-                if (this.semanticSearchEngine) {
-                    new SemanticSearchModal(this.app, this).open();
-                } else {
-                    new Notice('Semantic search is not initialized');
-                }
-            });
-        }
+        this.updateSemanticRibbonIcon(this.settings.semanticSearch.enableSemanticSearch);
 
         this.addSettingTab(new BetterCommandPaletteSettingTab(this.app, this));
     }
 
+    private createSuggestionsWorker(): Worker {
+        try {
+            return new SuggestionsWorker({});
+        } catch (error) {
+            logger.warn('Falling back to main-thread suggestions worker', error);
+            return new SuggestionsWorkerFallback() as unknown as Worker;
+        }
+    }
+
+    private initializeWorkspaceServices(): void {
+        const linkGraphService = this.shouldUseLinkGraph()
+            ? this.ensureLinkGraphService()
+            : undefined;
+
+        if (linkGraphService?.shouldRecomputeOnStartup()) {
+            linkGraphService.recompute().catch((error) => {
+                logger.error('Failed to compute link graph:', error);
+            });
+        } else if (linkGraphService) {
+            logger.debug('Link graph: Using fresh cached PageRank scores on startup');
+        }
+
+        this.searchService.initialize().catch((error) => {
+            logger.error('Failed to initialize enhanced search service:', error);
+        });
+
+        // Hybrid search is available immediately (keyword-only); the semantic engine
+        // is attached once its services are up, and auto-indexing runs in the background.
+        this.initializeHybridSearch();
+
+        if (this.settings.semanticSearch.enableSemanticSearch) {
+            logger.debug('Semantic search enabled, initializing');
+            this.setSemanticEnabled(true).catch((error) => {
+                logger.debug('Semantic search: startup initialization failed', error);
+            });
+        }
+    }
+
+    private shouldUseLinkGraph(): boolean {
+        return this.settings.hybridSearch.enabled && this.settings.linkGraph.enabled;
+    }
+
+    private ensureLinkGraphService(): LinkGraphService {
+        if (!this.linkGraphService) {
+            this.linkGraphService = new LinkGraphService(this.app, this.settings.linkGraph);
+        }
+        this.searchService?.setLinkGraphService(this.linkGraphService);
+
+        this.registerLinkGraphEvents();
+        return this.linkGraphService;
+    }
+
     onunload(): void {
+        if (this.lightweightSettingsSaveTimer) {
+            window.clearTimeout(this.lightweightSettingsSaveTimer);
+            this.lightweightSettingsSaveTimer = undefined;
+            void this.saveData(this.settings);
+        }
+
+        if (this.settingsSaveTimer) {
+            window.clearTimeout(this.settingsSaveTimer);
+            this.settingsSaveTimer = undefined;
+            void this.saveData(this.settings);
+        }
+
+        this.suggestionsWorker.onmessage = null;
         this.suggestionsWorker.terminate();
 
         // Cleanup search service
@@ -354,85 +397,164 @@ export default class BetterCommandPalettePlugin extends Plugin {
             this.hybridSearchService.destroy();
         }
 
-        // Cleanup semantic search services using the coordinator
-        if (this.semanticIndexingCoordinator) {
-            this.semanticIndexingCoordinator.shutdown().catch((error) => {
-                logger.error('Error shutting down semantic indexing coordinator:', error);
+        if (this.linkGraphService) {
+            this.linkGraphService.destroy();
+        }
+
+        if (this.usageTracker) {
+            this.usageTracker.shutdown();
+        }
+
+        // Cleanup semantic search services (removes vault listeners, saves cache)
+        this.updateSemanticRibbonIcon(false);
+        this.setSemanticEnabled(false).catch((error) => {
+            logger.error('Error shutting down semantic search:', error);
+        });
+    }
+
+    /**
+     * Start or stop the semantic search services. Idempotent and serialized:
+     * enabling twice keeps one set of services and one set of vault listeners;
+     * disabling detaches semantic from hybrid search, removes listeners and shuts
+     * the coordinator down. Rejects if starting fails (the error is already logged).
+     */
+    public setSemanticEnabled(enabled: boolean): Promise<void> {
+        return this.runSemanticTransition(() => (enabled
+            ? this.startSemanticSearch({ autoIndex: true })
+            : this.stopSemanticSearch()));
+    }
+
+    private runSemanticTransition(action: () => Promise<void>): Promise<void> {
+        const run = this.semanticTransition.then(action);
+        this.semanticTransition = run.catch(() => undefined);
+        return run;
+    }
+
+    private async startSemanticSearch(options: { autoIndex: boolean }): Promise<void> {
+        if (this.semanticIndexingCoordinator && this.semanticSearchEngine && this.embeddingService) {
+            this.updateHybridSearchWithSemantic();
+            return;
+        }
+
+        logger.debug('Semantic search: Initializing services...');
+        const semanticSettings = this.settings.semanticSearch;
+        let embeddingService: EmbeddingService | undefined;
+        let coordinator: SemanticIndexingCoordinator;
+
+        try {
+            embeddingService = new EmbeddingService(
+                this.app.vault,
+                this.app.metadataCache,
+                semanticSettings,
+                this.app,
+                // Bundled local-embedding runtime assets live next to main.js
+                { pluginDir: this.manifest.dir },
+            );
+            await embeddingService.initialize();
+
+            const semanticSearchEngine = new SemanticSearchEngine(
+                embeddingService,
+                this.app.vault,
+                this.app.metadataCache,
+                semanticSettings,
+            );
+
+            coordinator = new SemanticIndexingCoordinator(
+                this.app,
+                embeddingService,
+                semanticSettings,
+            );
+            await coordinator.initialize();
+
+            this.embeddingService = embeddingService;
+            this.semanticSearchEngine = semanticSearchEngine;
+            this.semanticIndexingCoordinator = coordinator;
+        } catch (error) {
+            logger.error('Semantic search: Failed to initialize:', error);
+            new Notice('Failed to initialize semantic search. Check console for details.');
+            embeddingService?.close();
+            throw error;
+        }
+
+        this.registerSemanticEvents(coordinator);
+        this.updateHybridSearchWithSemantic();
+        logger.debug('Semantic search: Initialization completed');
+
+        if (options.autoIndex) {
+            // Auto-index (if the cache is empty) in the background so hybrid search stays usable.
+            coordinator.checkForAutoIndexing().catch((error) => {
+                logger.error('Semantic search: Auto-indexing failed:', error);
             });
         }
     }
 
-    /**
-     * Initialize semantic search components
-     */
-    async initializeSemanticSearch(): Promise<void> {
-        try {
-            logger.debug('Semantic search: Initializing after workspace is ready...');
+    private async stopSemanticSearch(): Promise<void> {
+        this.unregisterSemanticEvents();
+        this.hybridSearchService?.setSemanticSearch(null);
 
-            this.embeddingService = new EmbeddingService(
-                this.app.vault,
-                this.app.metadataCache,
-                this.settings.semanticSearch,
-            );
+        const coordinator = this.semanticIndexingCoordinator;
+        const embeddingService = this.embeddingService;
+        this.semanticIndexingCoordinator = undefined;
+        this.semanticSearchEngine = undefined;
+        this.embeddingService = undefined;
 
-            await this.embeddingService.initialize();
+        if (coordinator) {
+            // Cancels indexing, saves the embedding cache and closes the embedding service.
+            await coordinator.shutdown();
+            logger.debug('Semantic search: Services shut down');
+        } else if (embeddingService) {
+            embeddingService.close();
+        }
+    }
 
-            this.semanticSearchEngine = new SemanticSearchEngine(
-                this.embeddingService,
-                this.app.vault,
-                this.app.metadataCache,
-                this.settings.semanticSearch,
-            );
+    private registerSemanticEvents(coordinator: SemanticIndexingCoordinator): void {
+        this.unregisterSemanticEvents();
 
-            // Initialize the semantic indexing coordinator
-            this.semanticIndexingCoordinator = new SemanticIndexingCoordinator(
-                this.app,
-                this.embeddingService,
-                this.settings.semanticSearch,
-            );
+        const onError = (action: string) => (error: unknown) => {
+            logger.error(`Semantic search: Failed to ${action}:`, error);
+        };
 
-            await this.semanticIndexingCoordinator.initialize();
+        this.semanticEventRefs = [
+            this.app.vault.on('create', (file) => {
+                if (file instanceof TFile && file.extension === 'md') {
+                    coordinator.indexFile(file).catch(onError('index created file'));
+                }
+            }),
+            this.app.vault.on('modify', (file) => {
+                if (file instanceof TFile && file.extension === 'md') {
+                    coordinator.indexFile(file).catch(onError('index modified file'));
+                }
+            }),
+            this.app.vault.on('delete', (file) => {
+                if (file instanceof TFile && file.extension === 'md') {
+                    coordinator.removeFile(file.path).catch(onError('remove deleted file'));
+                }
+            }),
+            this.app.vault.on('rename', (file, oldPath) => {
+                if (file instanceof TFile && file.extension === 'md') {
+                    coordinator.renameFile(oldPath, file.path).catch(onError('rename file'));
+                }
+            }),
+        ];
+    }
 
-            // Register file change events for incremental indexing using the coordinator
-            this.registerEvent(
-                this.app.vault.on('create', (file) => {
-                    if (file instanceof TFile && file.extension === 'md') {
-                        this.semanticIndexingCoordinator.indexFile(file);
-                    }
-                }),
-            );
+    private unregisterSemanticEvents(): void {
+        this.semanticEventRefs.forEach((ref) => this.app.vault.offref(ref));
+        this.semanticEventRefs = [];
+    }
 
-            this.registerEvent(
-                this.app.vault.on('modify', (file) => {
-                    if (file instanceof TFile && file.extension === 'md') {
-                        this.semanticIndexingCoordinator.indexFile(file);
-                    }
-                }),
-            );
-
-            this.registerEvent(
-                this.app.vault.on('delete', (file) => {
-                    if (file instanceof TFile && file.extension === 'md') {
-                        this.semanticIndexingCoordinator.removeFile(file.path);
-                    }
-                }),
-            );
-
-            this.registerEvent(
-                this.app.vault.on('rename', (file, oldPath) => {
-                    if (file instanceof TFile && file.extension === 'md') {
-                        this.semanticIndexingCoordinator.renameFile(oldPath, file.path);
-                    }
-                }),
-            );
-
-            logger.debug('Semantic search: Initialization completed successfully after workspace ready');
-
-            // Auto-index files if cache is empty using the coordinator
-            await this.semanticIndexingCoordinator.checkForAutoIndexing();
-        } catch (error) {
-            logger.error('Semantic search: Failed to initialize after workspace ready:', error);
-            new Notice('Failed to initialize semantic search. Check console for details.');
+    private updateSemanticRibbonIcon(enabled: boolean): void {
+        if (enabled && !this.semanticRibbonEl) {
+            this.semanticRibbonEl = this.addRibbonIcon('search', 'Open semantic search', () => {
+                if (this.semanticSearchEngine) {
+                    new SemanticSearchModal(this.app, this).open();
+                } else {
+                    new Notice('Semantic search is not initialized');
+                }
+            });
+        } else if (!enabled && this.semanticRibbonEl) {
+            this.semanticRibbonEl.remove();
+            this.semanticRibbonEl = undefined;
         }
     }
 
@@ -442,16 +564,29 @@ export default class BetterCommandPalettePlugin extends Plugin {
      */
     private initializeHybridSearch(): void {
         try {
+            if (!this.settings.hybridSearch.enabled) {
+                if (this.hybridSearchService) {
+                    this.hybridSearchService.destroy();
+                    this.hybridSearchService = undefined;
+                }
+                logger.debug('Hybrid search: Disabled, skipping initialization');
+                return;
+            }
+
             logger.debug('Hybrid search: Initializing...');
+            const linkGraphService = this.shouldUseLinkGraph()
+                ? this.ensureLinkGraphService()
+                : undefined;
 
             // Create hybrid search service with available components
+            this.hybridSearchService?.destroy();
             this.hybridSearchService = new HybridSearchService(
                 this.app,
                 this.searchService,
-                this.semanticSearchEngine || null, // May be null if semantic not enabled
+                this.semanticSearchEngine ?? null, // Attached later by setSemanticEnabled when ready
                 this.usageTracker,
                 this.settings.hybridSearch,
-                this.linkGraphService,
+                linkGraphService,
             );
 
             this.hybridSearchService.initialize().then(async () => {
@@ -473,10 +608,14 @@ export default class BetterCommandPalettePlugin extends Plugin {
      * Register file events for link graph updates
      */
     private registerLinkGraphEvents(): void {
+        if (this.linkGraphEventsRegistered) {
+            return;
+        }
+
         // Update link graph when files are created
         this.registerEvent(
             this.app.vault.on('create', (file) => {
-                if (file instanceof TFile && file.extension === 'md') {
+                if (this.shouldUseLinkGraph() && this.linkGraphService && file instanceof TFile && file.extension === 'md') {
                     logger.debug('[Main] vault.create event:', file.path);
                     logger.debug(`Link graph: File created - ${file.path}`);
                     this.linkGraphService.onFileCreate(file);
@@ -488,7 +627,7 @@ export default class BetterCommandPalettePlugin extends Plugin {
         // This is the primary trigger for link graph updates
         this.registerEvent(
             this.app.metadataCache.on('changed', (file) => {
-                if (file instanceof TFile && file.extension === 'md') {
+                if (this.shouldUseLinkGraph() && this.linkGraphService && file instanceof TFile && file.extension === 'md') {
                     logger.debug('[Main] metadataCache.changed event:', file.path);
                     logger.debug(`Link graph: Metadata changed - ${file.path}`);
                     this.linkGraphService.onFileModify(file);
@@ -501,7 +640,7 @@ export default class BetterCommandPalettePlugin extends Plugin {
         // Update link graph when files are deleted
         this.registerEvent(
             this.app.vault.on('delete', (file) => {
-                if (file instanceof TFile && file.extension === 'md') {
+                if (this.shouldUseLinkGraph() && this.linkGraphService && file instanceof TFile && file.extension === 'md') {
                     logger.debug('[Main] vault.delete event:', file.path);
                     logger.debug(`Link graph: File deleted - ${file.path}`);
                     this.linkGraphService.onFileDelete(file.path);
@@ -512,7 +651,7 @@ export default class BetterCommandPalettePlugin extends Plugin {
         // Update link graph when files are renamed
         this.registerEvent(
             this.app.vault.on('rename', (file, oldPath) => {
-                if (file instanceof TFile && file.extension === 'md') {
+                if (this.shouldUseLinkGraph() && this.linkGraphService && file instanceof TFile && file.extension === 'md') {
                     logger.debug('[Main] vault.rename event:', oldPath, '->', file.path);
                     logger.debug(`Link graph: File renamed - ${oldPath} -> ${file.path}`);
                     this.linkGraphService.onFileRename(oldPath, file.path);
@@ -522,10 +661,11 @@ export default class BetterCommandPalettePlugin extends Plugin {
 
         logger.debug('[Main] Link graph file events registered');
         logger.debug('Link graph: File events registered');
+        this.linkGraphEventsRegistered = true;
     }
 
     /**
-     * Update hybrid search with semantic engine once it's available
+     * Attach the semantic engine to hybrid search once it's available
      */
     public updateHybridSearchWithSemantic(): void {
         if (this.hybridSearchService && this.semanticSearchEngine) {
@@ -542,16 +682,16 @@ export default class BetterCommandPalettePlugin extends Plugin {
             throw new Error('Semantic search is not enabled');
         }
 
-        if (!this.semanticIndexingCoordinator) {
-            await this.initializeSemanticSearch();
-        }
+        // Ensure services are running without scheduling a competing auto-index
+        await this.runSemanticTransition(() => this.startSemanticSearch({ autoIndex: false }));
 
-        if (!this.semanticIndexingCoordinator) {
+        const coordinator = this.semanticIndexingCoordinator;
+        if (!coordinator) {
             throw new Error('Failed to initialize semantic indexing coordinator');
         }
 
         // Use the coordinator for reindexing
-        await this.semanticIndexingCoordinator.indexAllFiles();
+        await coordinator.indexAllFiles();
     }
 
     /**
@@ -562,29 +702,51 @@ export default class BetterCommandPalettePlugin extends Plugin {
             throw new Error('Semantic search is not enabled');
         }
 
-        if (!this.embeddingService) {
-            await this.initializeSemanticSearch();
-        }
+        await this.setSemanticEnabled(true);
 
-        if (!this.embeddingService) {
+        const { embeddingService } = this;
+        if (!embeddingService) {
             throw new Error('Embedding service not initialized');
         }
 
         const start = Date.now();
-        const vec = await this.embeddingService.generateEmbedding('hello world', 'search_query', 1);
+        const vec = await embeddingService.generateEmbedding('hello world', 'search_query', 1);
         const ms = Date.now() - start;
-        return `Embedding OK: ${vec.length} dims via ${this.settings.semanticSearch.embeddingModel || 'nomic-embed-text'} in ${ms}ms`;
+        return `Embedding OK: ${vec.length} dims via ${describeEmbeddingModel(this.settings.semanticSearch)} in ${ms}ms`;
+    }
+
+    /**
+     * Load (and on first use download) the configured embedding model, starting the
+     * semantic services if needed. Resolves with a human-readable result.
+     */
+    public async prepareEmbeddingModel(): Promise<{ ok: boolean; message: string }> {
+        if (!this.settings.semanticSearch.enableSemanticSearch) {
+            return { ok: false, message: 'Semantic search is not enabled' };
+        }
+
+        await this.setSemanticEnabled(true);
+        const { embeddingService } = this;
+        if (!embeddingService) {
+            return { ok: false, message: 'Embedding service not initialized' };
+        }
+
+        const ok = await embeddingService.checkConnection();
+        return {
+            ok,
+            message: embeddingService.getAvailabilityMessage() ?? (ok ? 'Embedding model ready' : 'Embedding model unavailable'),
+        };
     }
 
     loadMacroCommands() {
-        this.settings.macros.forEach((macroData, index) => {
+        this.assignMacroIds();
+        this.settings.macros.forEach((macroData) => {
             if (!macroData.name || !macroData.commandIds.length) {
                 return;
             }
 
             const macro = new MacroCommand(
                 this.app,
-                `${MACRO_COMMAND_ID_PREFIX}${index}`,
+                `${MACRO_COMMAND_ID_PREFIX}${macroData.id}`,
                 macroData.name,
                 macroData.commandIds,
                 macroData.delay,
@@ -604,6 +766,23 @@ export default class BetterCommandPalettePlugin extends Plugin {
         });
     }
 
+    /**
+     * Give every macro a unique stable id. Macros saved before ids existed keep
+     * their list index so existing hotkeys keep working.
+     */
+    private assignMacroIds() {
+        const usedIds = new Set<string>();
+        this.settings.macros.forEach((macroData, index) => {
+            if (!macroData.id || usedIds.has(macroData.id)) {
+                const legacyId = String(index);
+                macroData.id = usedIds.has(legacyId)
+                    ? `m-${Date.now().toString(36)}-${index}`
+                    : legacyId;
+            }
+            usedIds.add(macroData.id);
+        });
+    }
+
     deleteMacroCommands() {
         const macroCommandIds = Object.keys(this.app.commands.commands)
             .filter((id) => id.includes(MACRO_COMMAND_ID_PREFIX));
@@ -614,72 +793,212 @@ export default class BetterCommandPalettePlugin extends Plugin {
     }
 
     async loadSettings() {
-        const savedData = await this.loadData();
-        this.settings = {
-            ...DEFAULT_SETTINGS,
-            ...savedData,
-            // Deep-merge enhancedSearch to preserve new default properties for existing users
-            enhancedSearch: {
-                ...DEFAULT_SETTINGS.enhancedSearch,
-                ...(savedData?.enhancedSearch ?? {}),
-            },
-            // Deep-merge semanticSearch to preserve new default properties for existing users
-            semanticSearch: {
-                ...DEFAULT_SETTINGS.semanticSearch,
-                ...(savedData?.semanticSearch ?? {}),
-            },
-            // Deep-merge hybridSearch to preserve new default properties for existing users
-            hybridSearch: {
-                ...DEFAULT_SETTINGS.hybridSearch,
-                ...(savedData?.hybridSearch ?? {}),
-            },
-            // Deep-merge quickLink to preserve new default properties for existing users
-            quickLink: {
-                ...DEFAULT_SETTINGS.quickLink,
-                ...(savedData?.quickLink ?? {}),
-            },
-            linkGraph: {
-                ...DEFAULT_SETTINGS.linkGraph,
-                ...(savedData?.linkGraph ?? {}),
-            },
-        };
+        const savedData = (await this.loadData() ?? {}) as Partial<BetterCommandPalettePluginSettings>;
+        this.settings = BetterCommandPalettePlugin.mergeWithDefaults(savedData);
+        this.appliedSettingsSnapshot = this.cloneSettings(this.settings);
         this.loadMacroCommands();
     }
 
+    /**
+     * Merge saved settings over a deep copy of the defaults so nested objects
+     * never alias DEFAULT_SETTINGS and new default keys appear for existing users.
+     */
+    private static mergeWithDefaults(
+        savedData: Partial<BetterCommandPalettePluginSettings>,
+    ): BetterCommandPalettePluginSettings {
+        const defaults = structuredClone(DEFAULT_SETTINGS);
+        return {
+            ...defaults,
+            ...savedData,
+            enhancedSearch: {
+                ...defaults.enhancedSearch,
+                ...(savedData.enhancedSearch ?? {}),
+                scoreWeights: {
+                    ...defaults.enhancedSearch.scoreWeights,
+                    ...(savedData.enhancedSearch?.scoreWeights ?? {}),
+                },
+            },
+            semanticSearch: {
+                ...defaults.semanticSearch,
+                ...(savedData.semanticSearch ?? {}),
+                embeddingProvider: BetterCommandPalettePlugin.resolveSavedEmbeddingProvider(savedData.semanticSearch)
+                    ?? defaults.semanticSearch.embeddingProvider,
+            },
+            hybridSearch: {
+                ...defaults.hybridSearch,
+                ...(savedData.hybridSearch ?? {}),
+            },
+            quickLink: {
+                ...defaults.quickLink,
+                ...(savedData.quickLink ?? {}),
+            },
+            linkGraph: {
+                ...defaults.linkGraph,
+                ...(savedData.linkGraph ?? {}),
+            },
+        };
+    }
+
+    /**
+     * Provider for saved settings. Settings saved before providers existed keep using
+     * Ollama when the user had configured it (non-default URL or model); otherwise the
+     * in-plugin local model default applies.
+     */
+    private static resolveSavedEmbeddingProvider(
+        saved: Partial<SemanticSearchSettings> | undefined,
+    ): EmbeddingProviderId | undefined {
+        if (!saved) {
+            return undefined;
+        }
+        if (saved.embeddingProvider === 'local' || saved.embeddingProvider === 'ollama') {
+            return saved.embeddingProvider;
+        }
+
+        const defaults = DEFAULT_SETTINGS.semanticSearch;
+        const normalizeUrl = (url: string) => url.trim().replace(/\/+$/, '');
+        const customUrl = typeof saved.ollamaUrl === 'string' && saved.ollamaUrl.trim() !== ''
+            && normalizeUrl(saved.ollamaUrl) !== normalizeUrl(defaults.ollamaUrl);
+        const customModel = typeof saved.embeddingModel === 'string' && saved.embeddingModel.trim() !== ''
+            && saved.embeddingModel.trim() !== defaults.embeddingModel;
+
+        return customUrl || customModel ? 'ollama' : undefined;
+    }
+
+    /**
+     * Reset every setting to a fresh copy of the defaults and apply the change to
+     * all running services through the normal save path.
+     */
+    async resetSettings(): Promise<void> {
+        this.settings = structuredClone(DEFAULT_SETTINGS);
+        await this.saveSettings();
+    }
+
     async saveSettings() {
-        this.deleteMacroCommands();
+        const previousSettings = this.appliedSettingsSnapshot;
+        const macrosChanged = !previousSettings
+            || this.settingsChanged(previousSettings.macros, this.settings.macros);
+
+        if (macrosChanged) {
+            this.deleteMacroCommands();
+        }
+
         await this.saveData(this.settings);
-        this.loadMacroCommands();
+
+        if (macrosChanged) {
+            this.loadMacroCommands();
+        }
 
         // Update search settings if initialized
-        this.updateSearchSettings();
+        this.updateSearchSettings(previousSettings);
+        this.appliedSettingsSnapshot = this.cloneSettings(this.settings);
+    }
+
+    private cloneSettings(settings: BetterCommandPalettePluginSettings): BetterCommandPalettePluginSettings {
+        return JSON.parse(JSON.stringify(settings));
+    }
+
+    private settingsChanged(previousValue: unknown, nextValue: unknown): boolean {
+        return JSON.stringify(previousValue) !== JSON.stringify(nextValue);
+    }
+
+    scheduleLightweightSettingsSave(delayMs = 250): void {
+        if (this.lightweightSettingsSaveTimer) {
+            window.clearTimeout(this.lightweightSettingsSaveTimer);
+        }
+
+        this.lightweightSettingsSaveTimer = window.setTimeout(() => {
+            this.lightweightSettingsSaveTimer = undefined;
+            this.saveData(this.settings).catch((error) => {
+                logger.error('Failed to persist lightweight settings update:', error);
+            });
+        }, delayMs);
+    }
+
+    scheduleSettingsSave(delayMs = 400): void {
+        if (this.settingsSaveTimer) {
+            window.clearTimeout(this.settingsSaveTimer);
+        }
+
+        this.settingsSaveTimer = window.setTimeout(() => {
+            this.settingsSaveTimer = undefined;
+            this.saveSettings().catch((error) => {
+                logger.error('Failed to persist scheduled settings update:', error);
+            });
+        }, delayMs);
     }
 
     /**
      * Update search settings across all components
      */
-    private updateSearchSettings(): void {
-        // Update semantic search settings
-        if (this.embeddingService) {
-            this.embeddingService.updateSettings(this.settings.semanticSearch);
+    private updateSearchSettings(previousSettings?: BetterCommandPalettePluginSettings): void {
+        const fileMatchSettingsChanged = !previousSettings
+            || this.settingsChanged(previousSettings.fileTypeExclusion, this.settings.fileTypeExclusion);
+        const enhancedSettingsChanged = !previousSettings
+            || this.settingsChanged(previousSettings.enhancedSearch, this.settings.enhancedSearch);
+        const semanticSettingsChanged = !previousSettings
+            || this.settingsChanged(previousSettings.semanticSearch, this.settings.semanticSearch);
+        const hybridSettingsChanged = !previousSettings
+            || this.settingsChanged(previousSettings.hybridSearch, this.settings.hybridSearch);
+        const linkGraphSettingsChanged = !previousSettings
+            || this.settingsChanged(previousSettings.linkGraph, this.settings.linkGraph);
+
+        if (this.fileMatchCache) {
+            this.fileMatchCache.updateSettings(this.settings);
+            if (fileMatchSettingsChanged) {
+                this.fileMatchCache.rebuild();
+            }
         }
 
-        if (this.semanticSearchEngine) {
-            this.semanticSearchEngine.updateSettings(this.settings.semanticSearch);
+        // Update enhanced (keyword) search settings: typo tolerance, stemming, accents, synonyms...
+        if (enhancedSettingsChanged && this.searchService) {
+            this.searchService.updateSettings(this.settings.enhancedSearch);
+            this.hybridSearchService?.clearCache();
         }
 
-        if (this.semanticIndexingCoordinator) {
-            this.semanticIndexingCoordinator.updateSettings(this.settings.semanticSearch);
+        // Start/stop semantic search when toggled; otherwise push settings to running services
+        const semanticEnabled = this.settings.semanticSearch.enableSemanticSearch;
+        const semanticToggled = !previousSettings
+            || previousSettings.semanticSearch.enableSemanticSearch !== semanticEnabled;
+
+        if (semanticToggled) {
+            this.updateSemanticRibbonIcon(semanticEnabled);
+            this.setSemanticEnabled(semanticEnabled).catch((error) => {
+                logger.debug('Semantic search: toggle failed', error);
+            });
+        } else if (semanticSettingsChanged) {
+            this.embeddingService?.updateSettings(this.settings.semanticSearch);
+            this.semanticSearchEngine?.updateSettings(this.settings.semanticSearch);
+            this.semanticIndexingCoordinator?.updateSettings(this.settings.semanticSearch);
         }
 
         // Update hybrid search settings
-        if (this.hybridSearchService) {
+        if (hybridSettingsChanged && this.settings.hybridSearch.enabled && !this.hybridSearchService) {
+            this.initializeHybridSearch();
+        } else if (hybridSettingsChanged && !this.settings.hybridSearch.enabled && this.hybridSearchService) {
+            this.hybridSearchService.destroy();
+            this.hybridSearchService = undefined;
+        } else if (hybridSettingsChanged && this.hybridSearchService) {
             this.hybridSearchService.updateSettings(this.settings.hybridSearch);
         }
 
         // Update link graph settings
-        if (this.linkGraphService) {
+        if (linkGraphSettingsChanged && this.linkGraphService) {
             this.linkGraphService.updateSettings(this.settings.linkGraph);
+        }
+
+        if (this.shouldUseLinkGraph()) {
+            const linkGraphService = this.ensureLinkGraphService();
+            this.hybridSearchService?.setLinkGraphService(linkGraphService);
+            if (linkGraphSettingsChanged && linkGraphService.shouldRecomputeOnStartup()) {
+                linkGraphService.recompute().catch((error) => {
+                    logger.error('Failed to recompute link graph after settings update:', error);
+                });
+            }
+        } else if (this.linkGraphService) {
+            this.hybridSearchService?.clearLinkGraphService();
+            this.searchService?.clearLinkGraphService();
+            this.linkGraphService.destroy();
+            this.linkGraphService = undefined;
         }
     }
 
@@ -695,5 +1014,45 @@ export default class BetterCommandPalettePlugin extends Plugin {
      */
     public getSemanticSearchEngine(): SemanticSearchEngine | undefined {
         return this.semanticSearchEngine;
+    }
+
+    /**
+     * Invalidate cached hybrid results whenever vault content changes.
+     */
+    private registerHybridCacheEvents(): void {
+        const invalidate = () => this.hybridSearchService?.onVaultChange();
+        this.registerEvent(this.app.vault.on('create', invalidate));
+        this.registerEvent(this.app.vault.on('modify', invalidate));
+        this.registerEvent(this.app.vault.on('delete', invalidate));
+        this.registerEvent(this.app.vault.on('rename', invalidate));
+        this.registerEvent(this.app.metadataCache.on('changed', invalidate));
+    }
+
+    private registerFileMatchCacheEvents(): void {
+        this.registerEvent(
+            this.app.vault.on('create', (file) => {
+                this.fileMatchCache.onCreate(file);
+            }),
+        );
+
+        this.registerEvent(
+            this.app.metadataCache.on('changed', (file) => {
+                if (file instanceof TFile) {
+                    this.fileMatchCache.onMetadataChanged(file);
+                }
+            }),
+        );
+
+        this.registerEvent(
+            this.app.vault.on('delete', (file) => {
+                this.fileMatchCache.onDelete(file);
+            }),
+        );
+
+        this.registerEvent(
+            this.app.vault.on('rename', (file, oldPath) => {
+                this.fileMatchCache.onRename(file, oldPath);
+            }),
+        );
     }
 }

@@ -1,3 +1,4 @@
+import fs from 'fs';
 import path from 'path';
 import typescript from 'rollup-plugin-typescript2';
 import nodeResolve from '@rollup/plugin-node-resolve';
@@ -12,6 +13,31 @@ import alias from '@rollup/plugin-alias';
 const isProduction = process.env.NODE_ENV === 'production';
 const isLocal = process.env.DEST === 'local';
 const includeTestFiles = process.env.TYPE === 'test';
+
+/**
+ * onnxruntime-web WASM binary for the local embedding worker. Its JS glue is bundled
+ * (inlined in the worker via `onnxruntime-web/webgpu`), and this binary is copied next
+ * to main.js so nothing is loaded from a CDN. Must match the glue's flavour (asyncify).
+ */
+const ORT_WASM_ASSET = 'node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.asyncify.wasm';
+if (!includeTestFiles && !fs.existsSync(ORT_WASM_ASSET)) {
+    throw new Error(`Missing ${ORT_WASM_ASSET}. Run "bun install".`);
+}
+
+/**
+ * Workers are built by rollup-plugin-web-worker-loader as IIFE bundles, where rollup's
+ * default `import.meta.url` shim reads `document` (absent in workers). Point it at the
+ * worker's own location instead.
+ */
+const workerImportMeta = () => ({
+    name: 'worker-import-meta',
+    resolveImportMeta(property, { format }) {
+        if (format === 'iife' && property === 'url') {
+            return 'self.location.href';
+        }
+        return null;
+    },
+});
 
 let outputLocation = './test-vault/.obsidian/plugins/obsidian-better-command-palette';
 
@@ -56,8 +82,13 @@ export default {
                 ...(!isLocal
                     ? [{ src: 'manifest.json', dest: outputLocation }]
                     : []),
+                ...(!includeTestFiles
+                    ? [{ src: ORT_WASM_ASSET, dest: outputLocation }]
+                    : []),
             ],
+            copyOnce: true,
         }),
+        workerImportMeta(),
         webWorkerLoader({
             targetPlatform: 'browser',
             preserveSource: !isProduction,

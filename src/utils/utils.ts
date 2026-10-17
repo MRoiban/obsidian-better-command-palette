@@ -98,7 +98,8 @@ export async function getOrCreateFile(app: App, path: string): Promise<TFile> {
     let file = app.metadataCache.getFirstLinkpathDest(path, '');
 
     if (!file) {
-        const normalizedPath = normalizePath(`${path}.md`);
+        // Only add the Markdown extension when the user didn't type it already
+        const normalizedPath = normalizePath(path.toLowerCase().endsWith('.md') ? path : `${path}.md`);
         const dirOnlyPath = normalizedPath.split('/').slice(0, -1).join('/');
 
         // Create directory if needed

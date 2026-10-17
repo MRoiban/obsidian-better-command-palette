@@ -15,7 +15,16 @@ import {
     NormalizedKeywordResult,
     NormalizedSemanticResult,
 } from './types';
+import { HybridRelevanceScorer } from './relevance-scorer';
 import { logger } from '../../utils/logger';
+
+function normalizeScore(score: number, minScore: number, maxScore: number): number {
+    if (maxScore === minScore) {
+        return Math.max(0, Math.min(1, score));
+    }
+
+    return Math.max(0, Math.min(1, (score - minScore) / (maxScore - minScore)));
+}
 
 /**
  * Normalizes keyword search results for fusion
@@ -35,7 +44,6 @@ export function normalizeKeywordResults(
     const scores = results.map((r) => r.combinedScore);
     const maxScore = Math.max(...scores);
     const minScore = Math.min(...scores);
-    const scoreRange = maxScore - minScore || 1;
 
     logger.debug(`Hybrid fusion: Keyword score range: ${minScore.toFixed(4)} - ${maxScore.toFixed(4)}`);
 
@@ -48,7 +56,7 @@ export function normalizeKeywordResults(
             path: result.id,
             file: file as TFile,
             score: result.combinedScore,
-            normalizedScore: (result.combinedScore - minScore) / scoreRange,
+            normalizedScore: normalizeScore(result.combinedScore, minScore, maxScore),
             rank: index + 1,
             matches: result.matches,
             metadata: result.metadata,
@@ -78,7 +86,6 @@ export function normalizeSemanticResults(
     const scores = results.map((r) => r.relevanceScore);
     const maxScore = Math.max(...scores);
     const minScore = Math.min(...scores);
-    const scoreRange = maxScore - minScore || 1;
 
     logger.debug(`Hybrid fusion: Semantic score range: ${minScore.toFixed(4)} - ${maxScore.toFixed(4)}`);
 
@@ -86,10 +93,12 @@ export function normalizeSemanticResults(
         path: result.file.path,
         file: result.file,
         score: result.relevanceScore,
-        normalizedScore: (result.relevanceScore - minScore) / scoreRange,
+        normalizedScore: normalizeScore(result.relevanceScore, minScore, maxScore),
         rank: index + 1,
         similarity: result.similarity,
         excerpt: result.excerpt,
+        matchedChunkIndex: result.matchedChunkIndex,
+        matchedChunkText: result.matchedChunkText,
         matches: result.matches,
     }));
 }
@@ -196,30 +205,7 @@ export function computeBlendedScore(
     fusedResult: FusedResult,
     settings: HybridSearchSettings,
 ): number {
-    const { keywordWeight, semanticWeight } = settings;
-
-    let blendedScore = 0;
-    let totalWeight = 0;
-
-    // Blend in normalized keyword score
-    if (fusedResult.keywordResult) {
-        blendedScore += keywordWeight * fusedResult.keywordResult.normalizedScore;
-        totalWeight += keywordWeight;
-    }
-
-    // Blend in semantic similarity score
-    if (fusedResult.semanticResult) {
-        blendedScore += semanticWeight * fusedResult.semanticResult.normalizedScore;
-        totalWeight += semanticWeight;
-    }
-
-    // Normalize by actual weights used
-    if (totalWeight > 0) {
-        blendedScore /= totalWeight;
-    }
-
-    // Combine RRF and blended scores (70% RRF, 30% blended)
-    const combinedScore = (0.7 * fusedResult.fusionScore) + (0.3 * blendedScore);
-
-    return combinedScore;
+    const scorer = new HybridRelevanceScorer(settings);
+    const context = scorer.createRetrievalContext([fusedResult]);
+    return scorer.computeRetrievalScore(fusedResult, context).retrievalScore;
 }

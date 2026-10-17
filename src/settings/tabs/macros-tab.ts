@@ -112,6 +112,7 @@ export class MacrosTab implements BaseSettingsTab {
 
     private async createNewMacro(plugin: BetterCommandPalettePlugin, refresh: () => void): Promise<void> {
         plugin.settings.macros.push({
+            id: `m-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
             name: `Macro ${plugin.settings.macros.length + 1}`,
             commandIds: [],
             delay: 100,

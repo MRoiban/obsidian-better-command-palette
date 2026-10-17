@@ -1,11 +1,17 @@
 /**
- * Request queue for rate limiting Ollama API calls with adaptive throttling
+ * Request queue for file-level indexing concurrency, with adaptive throttling
+ * (used for Ollama, where response times reflect server load)
  */
 
 import { logger } from '../../utils/logger';
 
+interface QueuedRequest {
+    run: () => Promise<void>;
+    reject: (error: Error) => void;
+}
+
 export class RequestQueue {
-    private queue: Array<() => Promise<any>> = [];
+    private queue: QueuedRequest[] = [];
 
     private activeRequests = 0;
 
@@ -36,20 +42,23 @@ export class RequestQueue {
 
     async add<T>(request: () => Promise<T>): Promise<T> {
         return new Promise((resolve, reject) => {
-            this.queue.push(async () => {
-                const startTime = Date.now();
-                try {
-                    this.activeRequests++;
-                    const result = await request();
-                    this.recordResponseTime(Date.now() - startTime, true);
-                    resolve(result);
-                } catch (error) {
-                    this.recordResponseTime(Date.now() - startTime, false);
-                    reject(error);
-                } finally {
-                    this.activeRequests--;
-                    this.processNext();
-                }
+            this.queue.push({
+                reject,
+                run: async () => {
+                    const startTime = Date.now();
+                    try {
+                        this.activeRequests++;
+                        const result = await request();
+                        this.recordResponseTime(Date.now() - startTime, true);
+                        resolve(result);
+                    } catch (error) {
+                        this.recordResponseTime(Date.now() - startTime, false);
+                        reject(error);
+                    } finally {
+                        this.activeRequests--;
+                        this.processNext();
+                    }
+                },
             });
 
             this.processNext();
@@ -98,9 +107,9 @@ export class RequestQueue {
     }
 
     private processNext(): void {
-        if (this.queue.length > 0 && this.activeRequests < this.maxConcurrent) {
+        while (this.queue.length > 0 && this.activeRequests < this.maxConcurrent) {
             const request = this.queue.shift()!;
-            request();
+            request.run();
         }
     }
 
@@ -116,7 +125,9 @@ export class RequestQueue {
         return this.maxConcurrent;
     }
 
-    clear(): void {
+    clear(reason = 'Request queue cleared'): void {
+        const error = new Error(reason);
+        this.queue.forEach((request) => request.reject(error));
         this.queue = [];
     }
 

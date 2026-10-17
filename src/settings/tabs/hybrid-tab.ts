@@ -40,9 +40,9 @@ export class HybridTab implements BaseSettingsTab {
                 .setLimits(1, 100, 1)
                 .setValue(settings.hybridSearch.rrfK)
                 .setDynamicTooltip()
-                .onChange(async (value) => {
+                .onChange((value) => {
                     settings.hybridSearch.rrfK = value;
-                    await plugin.saveSettings();
+                    plugin.scheduleSettingsSave();
                 }));
 
         new Setting(containerEl)
@@ -52,9 +52,9 @@ export class HybridTab implements BaseSettingsTab {
                 .setLimits(0, 1, 0.1)
                 .setValue(settings.hybridSearch.keywordWeight)
                 .setDynamicTooltip()
-                .onChange(async (value) => {
+                .onChange((value) => {
                     settings.hybridSearch.keywordWeight = value;
-                    await plugin.saveSettings();
+                    plugin.scheduleSettingsSave();
                 }));
 
         new Setting(containerEl)
@@ -64,9 +64,9 @@ export class HybridTab implements BaseSettingsTab {
                 .setLimits(0, 1, 0.1)
                 .setValue(settings.hybridSearch.semanticWeight)
                 .setDynamicTooltip()
-                .onChange(async (value) => {
+                .onChange((value) => {
                     settings.hybridSearch.semanticWeight = value;
-                    await plugin.saveSettings();
+                    plugin.scheduleSettingsSave();
                 }));
 
         // --- Re-ranking Settings ---
@@ -84,14 +84,14 @@ export class HybridTab implements BaseSettingsTab {
 
         new Setting(containerEl)
             .setName('Re-rank Pool Size')
-            .setDesc('How many results to re-rank (default: 20)')
+            .setDesc('How many results to re-rank (default: 15)')
             .addSlider((slider) => slider
                 .setLimits(5, 50, 5)
                 .setValue(settings.hybridSearch.reRankPoolSize)
                 .setDynamicTooltip()
-                .onChange(async (value) => {
+                .onChange((value) => {
                     settings.hybridSearch.reRankPoolSize = value;
-                    await plugin.saveSettings();
+                    plugin.scheduleSettingsSave();
                 }));
 
         // Re-ranking weights
@@ -104,10 +104,10 @@ export class HybridTab implements BaseSettingsTab {
                     // @ts-ignore
                     .setValue(settings.hybridSearch[key] as number)
                     .setDynamicTooltip()
-                    .onChange(async (value) => {
+                    .onChange((value) => {
                         // @ts-ignore
                         settings.hybridSearch[key] = value;
-                        await plugin.saveSettings();
+                        plugin.scheduleSettingsSave();
                     }));
         };
 
@@ -128,9 +128,9 @@ export class HybridTab implements BaseSettingsTab {
                 .setLimits(5, 50, 5)
                 .setValue(settings.hybridSearch.maxResults)
                 .setDynamicTooltip()
-                .onChange(async (value) => {
+                .onChange((value) => {
                     settings.hybridSearch.maxResults = value;
-                    await plugin.saveSettings();
+                    plugin.scheduleSettingsSave();
                 }));
 
         new Setting(containerEl)
@@ -140,9 +140,9 @@ export class HybridTab implements BaseSettingsTab {
                 .setLimits(0, 0.5, 0.05)
                 .setValue(settings.hybridSearch.minScoreThreshold)
                 .setDynamicTooltip()
-                .onChange(async (value) => {
+                .onChange((value) => {
                     settings.hybridSearch.minScoreThreshold = value;
-                    await plugin.saveSettings();
+                    plugin.scheduleSettingsSave();
                 }));
 
         new Setting(containerEl)
@@ -175,9 +175,9 @@ export class HybridTab implements BaseSettingsTab {
                 .setLimits(0.7, 0.95, 0.05)
                 .setValue(settings.hybridSearch.clusterSimilarityThreshold)
                 .setDynamicTooltip()
-                .onChange(async (value) => {
+                .onChange((value) => {
                     settings.hybridSearch.clusterSimilarityThreshold = value;
-                    await plugin.saveSettings();
+                    plugin.scheduleSettingsSave();
                 }));
     }
 }

@@ -5,14 +5,19 @@ import {
     generateHotKeyText,
     getOrCreateFile,
     openFileWithEventKeys,
-    OrderedSet,
     PaletteMatch, SuggestModalAdapter,
-    createPaletteMatchesFromFilePath,
 } from '../utils';
-import { Match, UnsafeAppInterface } from '../types/types';
-import { ActionType } from '../utils/constants';
+import { Match, UnsafeAppInterface, WorkerMode } from '../types/types';
+import { ActionType, QUERY_OR, QUERY_TAG } from '../utils/constants';
 import { EnhancedSearchService } from '../search/enhanced-search-service';
+import { FileMatchCacheService } from '../search/file-match-cache-service';
 import { logger } from '../utils/logger';
+
+/** Queries shorter than this are served by the fuzzy worker instead of the index */
+const MIN_ENHANCED_QUERY_LENGTH = 2;
+
+/** Debounce for content search while typing */
+const SEARCH_DEBOUNCE_MS = 100;
 
 /**
  * Enhanced file adapter that uses the new search system
@@ -26,18 +31,31 @@ export default class EnhancedFileAdapter extends SuggestModalAdapter {
 
     allItems: Match[];
 
-    unresolvedItems: OrderedSet<Match>;
-
     fileSearchPrefix: string;
 
     private searchService?: EnhancedSearchService;
 
-    constructor(app: any, prevItems: any, plugin: any, palette: any, searchService?: EnhancedSearchService) {
+    private fileMatchCache: FileMatchCacheService;
+
+    private syncedCacheVersion: number;
+
+    constructor(
+        app: any,
+        prevItems: any,
+        plugin: any,
+        palette: any,
+        searchService?: EnhancedSearchService,
+        fileMatchCache?: FileMatchCacheService,
+    ) {
         super(app, prevItems, plugin, palette);
         this.searchService = searchService;
-        // Initialize these properties to avoid undefined errors during early access
-        this.unresolvedItems = new OrderedSet<Match>();
+        this.fileMatchCache = fileMatchCache!;
         this.allItems = [];
+        this.syncedCacheVersion = -1;
+    }
+
+    getWorkerMode(): WorkerMode {
+        return 'files';
     }
 
     initialize(): void {
@@ -47,74 +65,21 @@ export default class EnhancedFileAdapter extends SuggestModalAdapter {
         this.emptyStateText = 'No matching files.';
         this.fileSearchPrefix = this.plugin.settings.fileSearchPrefix;
 
-        this.hiddenIds = this.plugin.settings.hiddenFiles;
+        this.hiddenIds = [...this.plugin.settings.hiddenFiles];
         this.hiddenIdsSettingsKey = 'hiddenFiles';
 
-        this.allItems = [];
-        this.unresolvedItems = new OrderedSet<Match>();
-
-        // Load all files like the original adapter
-        this.app.metadataCache.getCachedFiles()
-            .forEach((filePath: string) => {
-                // Validate file path
-                if (!filePath || typeof filePath !== 'string') {
-                    return;
-                }
-
-                const badfileType = this.plugin.settings.fileTypeExclusion.some((suf) => filePath.endsWith(`.${suf}`));
-
-                // If we shouldn't show the file type just return right now
-                if (badfileType) return;
-
-                const matches = createPaletteMatchesFromFilePath(this.app.metadataCache, filePath);
-
-                // Process matches to apply display settings
-                const processedMatches = matches.map((match) => {
-                    if (match.id.includes(':')) {
-                        // This is an alias, keep it as is
-                        return match;
-                    }
-                    // This is a regular file, process the display path
-                    const displayPath = this.processDisplayPath(match.text);
-                    return new PaletteMatch(
-                        match.id, // Keep original path as ID
-                        displayPath, // Use processed path for display
-                        match.tags, // Preserve tags
-                    );
-                });
-
-                this.allItems = this.allItems.concat(processedMatches);
-
-                // Add unresolved links with validation
-                const unresolvedLinks = this.app.metadataCache.unresolvedLinks[filePath];
-                if (unresolvedLinks && typeof unresolvedLinks === 'object') {
-                    Object.keys(unresolvedLinks).forEach((p) => {
-                        if (p && typeof p === 'string' && p.trim()) {
-                            this.unresolvedItems.add(new PaletteMatch(p, p));
-                        }
-                    });
-                }
-            });
-
-        // Add the deduped links to all items
-        this.allItems = this.allItems.concat(Array.from(this.unresolvedItems.values())).reverse();
+        this.syncFromCache();
 
         // Use obsidian's last open files as the previous items
         [...this.app.workspace.getLastOpenFiles()].reverse().forEach((filePath) => {
-            const matches = createPaletteMatchesFromFilePath(this.app.metadataCache, filePath);
+            const primaryMatch = this.fileMatchCache.getPrimaryMatch(filePath);
 
-            // For previous items we only want the actual file, not any aliases
-            if (matches[0]) {
-                // Process the display path according to user settings
-                const displayPath = this.processDisplayPath(filePath);
-                const processedMatch = new PaletteMatch(
-                    filePath, // Keep original path as ID for file opening
-                    displayPath, // Use processed path for display
-                    matches[0].tags, // Preserve tags
-                );
-                this.prevItems.add(processedMatch);
+            if (primaryMatch) {
+                this.prevItems.add(primaryMatch);
             }
         });
+
+        this.rebuildSortedItems();
     }
 
     mount(): void {
@@ -136,26 +101,31 @@ export default class EnhancedFileAdapter extends SuggestModalAdapter {
     }
 
     cleanQuery(query: string): string {
-        return query.replace(this.fileSearchPrefix, '');
+        // Only strip a leading prefix so cleaning is idempotent and paths keep their slashes
+        return query.startsWith(this.fileSearchPrefix)
+            ? query.slice(this.fileSearchPrefix.length)
+            : query;
     }
 
     /**
-     * Process display path according to user settings
+     * Use the index only when it is ready and the query is something it can answer.
+     * Short queries and tag (@) / OR (||) syntax go to the fuzzy worker.
+     * Like the search hooks below, receives the query already cleaned by the palette.
      */
-    private processDisplayPath(filePath: string): string {
-        let displayPath = filePath;
-
-        // Build the displayed note name without its full path if required in settings
-        if (this.plugin.settings.displayOnlyNotesNames) {
-            displayPath = filePath.split('/').pop() || filePath;
+    canUseEnhancedSearch(cleanQuery: string): boolean {
+        if (cleanQuery.length < MIN_ENHANCED_QUERY_LENGTH) {
+            return false;
         }
 
-        // Build the displayed note name without its Markdown extension if required in settings
-        if (this.plugin.settings.hideMdExtension && displayPath.endsWith('.md')) {
-            displayPath = displayPath.slice(0, -3);
+        if (cleanQuery.includes(QUERY_TAG) || cleanQuery.includes(QUERY_OR)) {
+            return false;
         }
 
-        return displayPath;
+        return this.searchService?.isReady() ?? false;
+    }
+
+    getSearchDebounceMs(): number {
+        return SEARCH_DEBOUNCE_MS;
     }
 
     /**
@@ -163,8 +133,9 @@ export default class EnhancedFileAdapter extends SuggestModalAdapter {
      */
     async getSearchResults(query: string): Promise<Match[]> {
         logger.debug('Enhanced search: getSearchResults called with:', query);
+        this.syncFromCache();
 
-        const cleanQuery = this.cleanQuery(query);
+        const cleanQuery = query;
         if (cleanQuery.length < 2) {
             return [];
         }
@@ -179,14 +150,11 @@ export default class EnhancedFileAdapter extends SuggestModalAdapter {
             const enhancedResults = await this.searchService.search(cleanQuery, 50);
             logger.debug('Enhanced search: Found', enhancedResults.length, 'results for query:', cleanQuery);
 
-            return enhancedResults.map((result) => {
-                const displayPath = this.processDisplayPath(result.metadata.path);
-                return new PaletteMatch(
-                    result.metadata.path, // Use original path as ID for file opening
-                    displayPath, // Use processed path for display
-                    result.metadata.tags || [],
-                );
-            });
+            return enhancedResults.map((result) => new PaletteMatch(
+                result.metadata.path,
+                result.metadata.path,
+                result.metadata.tags || [],
+            ));
         } catch (error) {
             logger.error('Enhanced search failed:', error);
             return [];
@@ -202,18 +170,21 @@ export default class EnhancedFileAdapter extends SuggestModalAdapter {
         },
     ): Promise<void> {
         logger.debug('Enhanced search: streamSearchResults called with:', query);
+        this.syncFromCache();
 
-        const cleanQuery = this.cleanQuery(query);
-        if (cleanQuery.length < 2 || !this.searchService?.isReady()) {
-            options.onUpdate([], true);
-            return;
+        const cleanQuery = query;
+        if (!this.searchService || !this.canUseEnhancedSearch(cleanQuery)) {
+            // Let the palette fall back to the fuzzy worker
+            throw new Error('Enhanced search is not available for this query');
         }
 
         try {
             await this.searchService.searchStream(cleanQuery, options.limit, {
                 signal: options.signal,
                 onChunk: (results, status) => {
-                    if (options.signal?.aborted) {
+                    // Intermediate chunks are partial and quickly superseded;
+                    // only emit the final list so the view redraws once per query
+                    if (options.signal?.aborted || !status.done) {
                         return;
                     }
 
@@ -224,10 +195,9 @@ export default class EnhancedFileAdapter extends SuggestModalAdapter {
                         }
                         seen.add(result.metadata.path);
 
-                        const displayPath = this.processDisplayPath(result.metadata.path);
                         acc.push(new PaletteMatch(
                             result.metadata.path,
-                            displayPath,
+                            result.metadata.path,
                             result.metadata.tags || [],
                         ));
                         return acc;
@@ -241,17 +211,20 @@ export default class EnhancedFileAdapter extends SuggestModalAdapter {
                 return;
             }
             logger.error('Enhanced search streaming failed:', error);
-            options.onUpdate([], true);
+            // Rethrow so the palette can fall back to the fuzzy worker
+            throw error;
         }
     }
 
-    renderSuggestion(match: Match, content: HTMLElement, aux?: HTMLElement): void {
+    renderSuggestion(match: Match, content: HTMLElement, _aux?: HTMLElement): void {
+        this.syncFromCache();
         // Always use the original file adapter rendering style
         this.renderOriginalSuggestion(match, content);
     }
 
     private renderOriginalSuggestion(match: Match, content: HTMLElement): void {
-        let noteName = match.text;
+        const filePath = this.getResolvedFilePath(match);
+        let noteName = match.id.includes(':') ? match.text : filePath;
 
         // Build the displayed note name without its full path if required in settings
         if (this.plugin.settings.displayOnlyNotesNames) {
@@ -269,7 +242,7 @@ export default class EnhancedFileAdapter extends SuggestModalAdapter {
         });
 
         // Add file type indicator
-        this.addFileTypeIndicator(suggestionEl, match.text);
+        this.addFileTypeIndicator(suggestionEl, filePath);
 
         // Add recently accessed indicator if applicable
         if (this.isRecentlyAccessed(match)) {
@@ -277,8 +250,8 @@ export default class EnhancedFileAdapter extends SuggestModalAdapter {
         }
 
         // Smart path rendering - show folder structure more intelligently
-        if (!this.plugin.settings.displayOnlyNotesNames && match.text.includes('/')) {
-            this.renderSmartPath(suggestionEl, match.text, noteName);
+        if (!this.plugin.settings.displayOnlyNotesNames && filePath.includes('/')) {
+            this.renderSmartPath(suggestionEl, filePath);
         } else {
             suggestionEl.createEl('span', {
                 cls: 'path-part filename',
@@ -287,7 +260,7 @@ export default class EnhancedFileAdapter extends SuggestModalAdapter {
         }
 
         // Add unresolved styling if this is an unresolved link
-        if (this.unresolvedItems.has(match)) {
+        if (this.fileMatchCache.isUnresolvedId(match.id)) {
             suggestionEl.addClass('unresolved');
         }
 
@@ -303,7 +276,7 @@ export default class EnhancedFileAdapter extends SuggestModalAdapter {
             const [, path] = match.id.split(':');
             suggestionEl.createEl('span', {
                 cls: 'suggestion-note',
-                text: path,
+                text: path || match.id,
             });
         }
 
@@ -377,9 +350,17 @@ export default class EnhancedFileAdapter extends SuggestModalAdapter {
      * Smart path rendering that emphasizes filename while showing context
      * Now relies on CSS text-overflow: ellipsis for clipping
      */
-    private renderSmartPath(container: HTMLElement, fullPath: string, displayName: string): void {
-        // Simply set the full path and let CSS handle the ellipsis
-        container.textContent = fullPath;
+    private renderSmartPath(container: HTMLElement, fullPath: string): void {
+        const displayPath = this.plugin.settings.hideMdExtension && fullPath.endsWith('.md')
+            ? fullPath.slice(0, -3)
+            : fullPath;
+
+        // Append (don't overwrite) so the type badge and recent indicator survive;
+        // CSS on .path-part handles the ellipsis
+        container.createEl('span', {
+            cls: 'path-part full-path',
+            text: displayPath,
+        });
 
         // Always set the full path as tooltip
         container.title = fullPath;
@@ -391,7 +372,7 @@ export default class EnhancedFileAdapter extends SuggestModalAdapter {
     private isRecentlyAccessed(match: Match): boolean {
         if (!this.searchService) return false;
 
-        const lastOpened = this.searchService.getLastOpened?.(match.text);
+        const lastOpened = this.searchService.getLastOpened?.(this.getResolvedFilePath(match));
         if (!lastOpened) return false;
 
         // Consider files accessed in the last 24 hours as recent
@@ -420,13 +401,8 @@ export default class EnhancedFileAdapter extends SuggestModalAdapter {
 
         // For enhanced search results, the match.id contains the original file path
         // while match.text might be a processed display name
-        let filePath = match.id;
-
-        // Handle alias selection (format: "alias:path")
-        if (match.id.includes(':')) {
-            const [, path] = match.id.split(':');
-            filePath = path;
-        }
+        this.syncFromCache();
+        const filePath = this.getResolvedFilePath(match);
 
         // Record file access in search service using the original path
         if (this.searchService) {
@@ -449,7 +425,9 @@ export default class EnhancedFileAdapter extends SuggestModalAdapter {
             openFileWithEventKeys(this.app, this.plugin.settings, file, event);
 
             // Add to previous items
-            this.prevItems.add(match);
+            const recentMatch = this.fileMatchCache.getPrimaryMatch(filePath)
+                || new PaletteMatch(filePath, filePath, match.tags);
+            this.recordRecentMatch(recentMatch);
         } catch (error) {
             new Notice(`Failed to open file: ${error.message}`);
         }
@@ -476,8 +454,10 @@ export default class EnhancedFileAdapter extends SuggestModalAdapter {
             logger.debug('Enhanced search: Searching for:', cleanQuery);
 
             const startTime = Date.now();
-            const enhancedResults = this.searchService.search(cleanQuery, this.plugin.settings.suggestionLimit);
+            const enhancedResults = await this.searchService.search(cleanQuery, this.plugin.settings.suggestionLimit);
             const searchTime = Date.now() - startTime;
+
+            logger.debug('Enhanced search: Search completed in', searchTime, 'ms');
 
             if (enhancedResults.length === 0) {
                 return;
@@ -499,10 +479,9 @@ export default class EnhancedFileAdapter extends SuggestModalAdapter {
                     continue;
                 }
 
-                const displayPath = this.processDisplayPath(result.metadata.path);
                 const suggestion = new PaletteMatch(
-                    result.metadata.path, // Use original path as ID for file opening
-                    displayPath, // Use processed path for display
+                    result.metadata.path,
+                    result.metadata.path,
                     result.metadata.tags || [],
                 );
                 if (suggestion) {
@@ -519,39 +498,31 @@ export default class EnhancedFileAdapter extends SuggestModalAdapter {
         }
     }
 
-    private loadAllFiles(): void {
-        // Get all markdown files and create matches
-        const files = this.app.vault.getMarkdownFiles();
+    getItems(): Match[] {
+        this.syncFromCache();
+        return super.getItems();
+    }
 
-        this.allItems = files
-            .filter((file) => {
-                // Apply file type exclusions
-                const badfileType = this.plugin.settings.fileTypeExclusion.some(
-                    (suffix) => file.path.endsWith(`.${suffix}`),
-                );
-                return !badfileType;
-            })
-            .flatMap((file) => {
-                const matches: Match[] = [];
+    getSortedItems(): Match[] {
+        this.syncFromCache();
+        return super.getSortedItems();
+    }
 
-                // Add main file
-                matches.push(new PaletteMatch(file.path, file.path));
+    private syncFromCache(): void {
+        if (!this.fileMatchCache || this.syncedCacheVersion === this.fileMatchCache.getVersion()) {
+            return;
+        }
 
-                // Add aliases if any
-                const metadata = this.app.metadataCache.getFileCache(file);
-                if (metadata?.frontmatter?.aliases) {
-                    const aliases = Array.isArray(metadata.frontmatter.aliases)
-                        ? metadata.frontmatter.aliases
-                        : [metadata.frontmatter.aliases];
+        this.syncedCacheVersion = this.fileMatchCache.getVersion();
+        this.setItems(this.fileMatchCache.getAllMatches());
+    }
 
-                    aliases.forEach((alias: string) => {
-                        if (alias && typeof alias === 'string') {
-                            matches.push(new PaletteMatch(`${alias}:${file.path}`, alias));
-                        }
-                    });
-                }
+    private getResolvedFilePath(match: Match): string {
+        if (!match.id.includes(':')) {
+            return match.id;
+        }
 
-                return matches;
-            });
+        const [, path] = match.id.split(':');
+        return path || match.id;
     }
 }

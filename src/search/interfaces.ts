@@ -66,6 +66,7 @@ export interface SearchIndex {
     serialize(): Promise<any>;
     loadFromData(data: any): Promise<void>;
     updateOptions?(options: any): void;
+    getDocumentIds?(): string[];
 }
 
 /**
@@ -77,6 +78,8 @@ export interface UsageTracker {
     recordFileCreate(path: string): void;
     getUsageScore(path: string): number;
     getRecencyScore(path: string): number;
+    recordResultFeedback(path: string, query: string, vote: 1 | -1): void;
+    getResultFeedbackScore(path: string, query?: string): number;
     getLastOpened(path: string): number | undefined;
     getSearchHistory(limit?: number): Array<{ query: string; timestamp: number; selectedPath?: string }>;
     reset(): Promise<void>;

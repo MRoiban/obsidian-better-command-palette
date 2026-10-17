@@ -1,12 +1,18 @@
 import { App, Setting, Notice } from 'obsidian';
 import BetterCommandPalettePlugin from 'src/main';
-import { DEFAULT_SETTINGS } from 'src/settings';
 import { BaseSettingsTab } from './base-tab';
 
 export class DangerZoneTab implements BaseSettingsTab {
     id = 'danger-zone';
     title = 'Danger Zone';
     icon = 'alert-triangle';
+
+    /** Called after a reset so the settings UI can re-render against the new settings object. */
+    private onReset?: () => void;
+
+    constructor(onReset?: () => void) {
+        this.onReset = onReset;
+    }
 
     display(containerEl: HTMLElement, app: App, plugin: BetterCommandPalettePlugin): void {
         const { settings } = plugin;
@@ -50,10 +56,9 @@ export class DangerZoneTab implements BaseSettingsTab {
                 .setWarning()
                 .onClick(async () => {
                     if (confirm('Are you sure you want to reset all settings?')) {
-                        plugin.settings = { ...DEFAULT_SETTINGS };
-                        await plugin.saveSettings();
+                        await plugin.resetSettings();
                         new Notice('All settings reset to defaults.');
-                        // Force refresh if feasible, or just notify to reload
+                        this.onReset?.();
                     }
                 }));
     }

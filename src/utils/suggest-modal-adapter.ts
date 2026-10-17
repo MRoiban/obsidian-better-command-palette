@@ -1,7 +1,7 @@
 import { App, Instruction, KeymapEventHandler } from 'obsidian';
 import BetterCommandPalettePlugin from 'src/main';
 import BetterCommandPaletteModal from 'src/palette';
-import { Match } from 'src/types/types';
+import { Match, WorkerMode } from 'src/types/types';
 import OrderedSet from 'src/utils/ordered-set';
 
 /**
@@ -31,6 +31,10 @@ export default abstract class SuggestModalAdapter {
 
     keymapHandlers: KeymapEventHandler[];
 
+    private sortedItemsCache: Match[];
+
+    private workerCorpusVersion: number;
+
     abstract titleText: string;
 
     abstract emptyStateText: string;
@@ -47,14 +51,32 @@ export default abstract class SuggestModalAdapter {
     }
 
     /**
+     * Whether enhanced search can serve this non-empty, cleaned query right now.
+     * When false, the palette falls back to the fuzzy suggestions worker (if the
+     * adapter has a worker mode) or shows the empty state.
+     */
+    canUseEnhancedSearch(_query: string): boolean {
+        return this.usesEnhancedSearch();
+    }
+
+    /**
+     * Debounce applied by the palette before running an enhanced search for a new query.
+     */
+    getSearchDebounceMs(): number {
+        return 0;
+    }
+
+    /**
      * Optional method for adapters that support enhanced search
      * Should return search results using the adapter's enhanced search capabilities
      */
     getSearchResults?(query: string): Promise<Match[]>;
 
     /**
-     * Optional streaming search hook. Implementers should emit the best-so-far
-     * matches whenever available and call onUpdate with done=true when complete.
+     * Optional streaming search hook. Implementers may emit an initial best-so-far
+     * list and must call onUpdate with done=true when complete. The palette redraws at
+     * most twice per query (first update and final update). Throwing makes the palette
+     * fall back to the fuzzy suggestions worker.
      */
     streamSearchResults?(
         query: string,
@@ -81,6 +103,8 @@ export default abstract class SuggestModalAdapter {
         this.initialized = false;
         this.hiddenIds = [];
         this.keymapHandlers = [];
+        this.sortedItemsCache = [];
+        this.workerCorpusVersion = 0;
     }
 
     getTitleText(): string {
@@ -116,6 +140,18 @@ export default abstract class SuggestModalAdapter {
         return query;
     }
 
+    getWorkerMode(): WorkerMode | null {
+        return null;
+    }
+
+    getWorkerCorpusVersion(): number {
+        return this.workerCorpusVersion;
+    }
+
+    getWorkerItems(): Match[] {
+        return this.getSortedItems();
+    }
+
     getPinnedItems(): Match[] {
         this.checkInitialized();
         return this.pinnedItems;
@@ -131,40 +167,54 @@ export default abstract class SuggestModalAdapter {
     }
 
     getSortedItems(): Match[] {
+        this.checkInitialized();
+        return this.sortedItemsCache;
+    }
+
+    protected setItems(items: Match[]): void {
+        this.allItems = items;
+        this.rebuildSortedItems();
+    }
+
+    protected setPinnedItems(items: Match[]): void {
+        this.pinnedItems = items;
+        this.rebuildSortedItems();
+    }
+
+    protected recordRecentMatch(match: Match): void {
+        this.prevItems.add(match);
+        this.rebuildSortedItems();
+    }
+
+    protected rebuildSortedItems(): void {
         const allItems = new OrderedSet(this.getItems());
 
-        // TODO: Clean up this logic. If we ever have more than two things this will not work.
         const firstItems = this.recentAbovePinned
             ? this.getPrevItems().values() : this.getPinnedItems();
         const secondItems = !this.recentAbovePinned
             ? this.getPrevItems().values() : this.getPinnedItems();
 
-        const itemsToAdd = [secondItems, firstItems];
-
-        itemsToAdd.forEach((toAdd) => {
-            toAdd.forEach((item) => {
+        [secondItems, firstItems].forEach((itemsToAdd) => {
+            itemsToAdd.forEach((item) => {
                 if (allItems.has(item)) {
-                    // Bring it to the top
                     allItems.add(item);
                 }
             });
         });
 
-        return allItems.valuesByLastAdd();
+        this.sortedItemsCache = allItems.valuesByLastAdd();
+        this.workerCorpusVersion += 1;
     }
 
-    async toggleHideId(id: string) {
+    toggleHideId(id: string) {
         if (this.hiddenIds.includes(id)) {
             this.hiddenIds = this.hiddenIds.filter((idToCheck) => id !== idToCheck);
         } else {
             this.hiddenIds.push(id);
         }
 
-        this.plugin.settings[this.hiddenIdsSettingsKey] = this.hiddenIds;
-
-        await this.plugin.saveSettings();
-        await this.plugin.loadSettings();
-
+        this.plugin.settings[this.hiddenIdsSettingsKey] = [...this.hiddenIds];
         this.palette.updateSuggestions();
+        this.plugin.scheduleLightweightSettingsSave();
     }
 }

@@ -5,7 +5,11 @@
 import { TFile, Vault, MetadataCache } from 'obsidian';
 import { EmbeddingService } from './embedding-service';
 import { SemanticSearchResult, SemanticSearchSettings } from './types';
+import { LruCache } from './lru-cache';
 import { logger } from '../../utils/logger';
+
+const SEARCH_CACHE_MAX_SIZE = 100;
+const QUERY_EMBEDDING_CACHE_MAX_SIZE = 64;
 
 export class SemanticSearchEngine {
     private embeddingService: EmbeddingService;
@@ -17,6 +21,14 @@ export class SemanticSearchEngine {
     private settings: SemanticSearchSettings;
 
     private searchCache: Map<string, SemanticSearchResult[]> = new Map();
+
+    /** Index version / model the search cache was built against; any change invalidates it. */
+    private searchCacheIndexVersion = -1;
+
+    private searchCacheFingerprint = '';
+
+    /** Query text -> query vector, so the same query with a different limit/threshold is not re-embedded. */
+    private queryEmbeddingCache = new LruCache<string, Float32Array>(QUERY_EMBEDDING_CACHE_MAX_SIZE);
 
     constructor(embeddingService: EmbeddingService, vault: Vault, metadataCache: MetadataCache, settings: SemanticSearchSettings) {
         this.embeddingService = embeddingService;
@@ -36,17 +48,28 @@ export class SemanticSearchEngine {
 
         logger.debug(`Semantic search: Starting search for "${query}" (limit: ${limit}, threshold: ${threshold})`);
 
+        if (signal?.aborted) {
+            return [];
+        }
+
         // Avoid hitting the embedding API with trivial queries
         if (!query || query.trim().length < 2) {
             logger.debug('Semantic search: Query too short, skipping semantic lookup');
             return [];
         }
 
-        // Check cache first
+        // Check cache first (dropped whenever the index or model changed)
+        this.validateSearchCache();
+        const indexVersionAtStart = this.embeddingService.getIndexVersion();
         const cacheKey = `${query}:${threshold}:${limit}`;
         if (useCache && this.searchCache.has(cacheKey)) {
             logger.debug(`Semantic search: Returning cached results for "${query}"`);
             return this.searchCache.get(cacheKey)!;
+        }
+
+        if (this.embeddingService.hasPendingModelChange()) {
+            logger.debug('Semantic search: Embedding model changed; waiting for reindex');
+            return [];
         }
 
         const indexedCount = this.embeddingService.getIndexedFileCount();
@@ -59,8 +82,21 @@ export class SemanticSearchEngine {
 
         // Generate query embedding
         logger.debug(`Semantic search: Generating embedding for query "${query}"`);
-        const queryEmbedding = await this.embeddingService.generateEmbedding(query, 'search_query');
+        let queryEmbedding: Float32Array;
+        try {
+            queryEmbedding = await this.getQueryEmbedding(query, signal);
+        } catch (error) {
+            if (error instanceof Error && error.name === 'AbortError') {
+                logger.debug(`Semantic search: Query embedding aborted for "${query}"`);
+                return [];
+            }
+            throw error;
+        }
         logger.debug(`Semantic search: Query embedding generated (${queryEmbedding.length} dimensions)`);
+
+        if (signal?.aborted) {
+            return [];
+        }
 
         // Guard against empty or mismatched query embedding to avoid noisy logs
         if (queryEmbedding.length === 0) {
@@ -69,16 +105,32 @@ export class SemanticSearchEngine {
         }
 
         const results: SemanticSearchResult[] = [];
-        const markdownFiles = this.vault.getMarkdownFiles();
+        const maxCandidates = Math.min(
+            indexedCount,
+            Math.max(limit * 50, 250),
+        );
+        const candidatePaths = this.embeddingService.getCandidateFilePaths(
+            queryEmbedding,
+            maxCandidates,
+            threshold,
+            signal,
+        );
         let checkedFiles = 0;
         let matchingFiles = 0;
         let totalChunksChecked = 0;
 
-        for (const file of markdownFiles) {
+        logger.debug(`Semantic search: Scanning ${candidatePaths.length}/${indexedCount} candidate files`);
+
+        for (const filePath of candidatePaths) {
             // Check for abort signal at start of each file iteration
             if (signal?.aborted) {
                 logger.debug(`Semantic search: Aborted after ${checkedFiles} files`);
                 return results.slice(0, limit); // Return partial results
+            }
+
+            const file = this.vault.getAbstractFileByPath(filePath);
+            if (!(file instanceof TFile)) {
+                continue;
             }
 
             // Get all chunk embeddings for this file
@@ -178,12 +230,13 @@ export class SemanticSearchEngine {
             logger.debug(`Semantic search: Score range: ${firstScore.toFixed(3)} (highest) to ${lastScore.toFixed(3)} (lowest)`);
         }
 
-        // Cache results
-        if (useCache) {
+        // Cache results, unless the index changed while this search was running
+        if (useCache && this.embeddingService.getIndexVersion() === indexVersionAtStart) {
+            this.validateSearchCache();
             this.searchCache.set(cacheKey, sortedResults);
 
             // Limit cache size
-            if (this.searchCache.size > 100) {
+            if (this.searchCache.size > SEARCH_CACHE_MAX_SIZE) {
                 const firstKey = this.searchCache.keys().next().value;
                 this.searchCache.delete(firstKey);
                 logger.debug('Semantic search: Cache size limited, removed oldest entry');
@@ -194,6 +247,38 @@ export class SemanticSearchEngine {
         logger.debug(`Semantic search: Search completed in ${searchTime}ms`);
 
         return sortedResults;
+    }
+
+    private validateSearchCache(): void {
+        const indexVersion = this.embeddingService.getIndexVersion();
+        const fingerprint = this.embeddingService.getModelFingerprintKey();
+        if (indexVersion !== this.searchCacheIndexVersion || fingerprint !== this.searchCacheFingerprint) {
+            if (this.searchCache.size > 0) {
+                logger.debug('Semantic search: Index changed, clearing search result cache');
+            }
+            this.searchCache.clear();
+            this.searchCacheIndexVersion = indexVersion;
+            this.searchCacheFingerprint = fingerprint;
+        }
+    }
+
+    private async getQueryEmbedding(query: string, signal?: AbortSignal): Promise<Float32Array> {
+        // Keyed by model fingerprint so a model change never reuses old query vectors
+        const key = `${this.embeddingService.getModelFingerprintKey()}::${query}`;
+        const cached = this.queryEmbeddingCache.get(key);
+        if (cached) {
+            logger.debug(`Semantic search: Reusing cached query embedding for "${query}"`);
+            return cached;
+        }
+
+        const embedding = await this.embeddingService.generateEmbedding(query, 'search_query', 1, {
+            signal,
+            timeoutMs: this.settings.searchTimeoutMs,
+        });
+        if (embedding.length > 0) {
+            this.queryEmbeddingCache.set(key, embedding);
+        }
+        return embedding;
     }
 
     private calculateRelevanceScore(file: TFile, similarity: number, query: string): number {
@@ -306,7 +391,7 @@ export class SemanticSearchEngine {
     getCacheStats(): { size: number; maxSize: number } {
         return {
             size: this.searchCache.size,
-            maxSize: 100,
+            maxSize: SEARCH_CACHE_MAX_SIZE,
         };
     }
 

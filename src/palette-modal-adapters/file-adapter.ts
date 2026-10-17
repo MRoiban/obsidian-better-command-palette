@@ -1,5 +1,5 @@
 import {
-    Instruction, Notice, setIcon,
+    Instruction, Notice, setIcon, TFile,
 } from 'obsidian';
 import {
     generateHotKeyText,
@@ -101,8 +101,10 @@ export default class BetterCommandPaletteFileAdapter extends SuggestModalAdapter
     }
 
     cleanQuery(query: string): string {
-        const newQuery = query.replace(this.fileSearchPrefix, '');
-        return newQuery;
+        // Only strip a leading prefix so cleaning is idempotent and paths keep their slashes
+        return query.startsWith(this.fileSearchPrefix)
+            ? query.slice(this.fileSearchPrefix.length)
+            : query;
     }
 
     renderSuggestion(match: Match, content: HTMLElement): void {

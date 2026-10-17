@@ -1,4 +1,6 @@
-import { App, TFile, debounce } from 'obsidian';
+import {
+    App, TFile, TAbstractFile, debounce, Debouncer, EventRef,
+} from 'obsidian';
 import {
     SearchSettings,
     EnhancedSearchResult,
@@ -10,8 +12,9 @@ import {
 import { MiniSearchAdapter, MiniSearchAdapterOptions } from './mini-search-adapter';
 import { TermFrequencyIndex } from './term-frequency-index';
 import { IndexingCoordinator } from './indexing-coordinator';
-import { IndexPersistence } from './persistence';
+import { IndexPersistence, LoadedSearchIndex } from './persistence';
 import { FileUsageTracker } from './usage-tracker';
+import type { LinkGraphService } from './link-graph-service';
 import { ContentSearchScorer } from './scorer';
 import { performanceMonitor } from './performance-monitor';
 import { logger } from '../utils/logger';
@@ -49,24 +52,62 @@ export class EnhancedSearchService {
         return this.isInitialized;
     }
 
-    private debouncedCacheSave: () => void;
+    private debouncedCacheSave: Debouncer<[], Promise<void>>;
 
     private cacheSavePending = false;
 
-    private isIndexing = false;
+    private bulkIndexingActive = false;
+
+    /** Promise of the in-flight vault indexing run, if any. */
+    private activeIndexingRun: Promise<void> | null = null;
+
+    /** Aborts the in-flight vault indexing run (rebuild, shutdown). */
+    private indexingAbort: AbortController | null = null;
+
+    /** Set when indexing work was skipped/interrupted while paused; reconciled on resume. */
+    private reconcileOnResume = false;
+
+    /** Renames observed while indexing was paused, replayed on resume. */
+    private pendingRenames: Array<{ oldPath: string; newPath: string }> = [];
+
+    /**
+     * Time the loaded cache snapshot was taken. Files indexed after this point
+     * may be missing/stale in the snapshot. Cleared once the first full
+     * reconciliation pass has inspected every file.
+     */
+    private cacheSnapshotTime: number | null = null;
+
+    /** Paths whose cached index entry may be stale and must be reindexed. */
+    private staleCachedPaths = new Set<string>();
+
+    private linkGraphService: LinkGraphService | null = null;
 
     private lastIndexOptions: MiniSearchAdapterOptions;
 
-    constructor(app: App, settings: SearchSettings) {
+    private fileWatcherRefs: EventRef[] = [];
+
+    private scheduledTimeouts = new Set<ReturnType<typeof setTimeout>>();
+
+    private scheduledIdleCallbacks = new Set<number>();
+
+    private isShuttingDown = false;
+
+    constructor(
+        app: App,
+        settings: SearchSettings,
+        usageTracker?: FileUsageTracker,
+        linkGraphService?: LinkGraphService,
+    ) {
         this.app = app;
         this.settings = settings;
+        this.linkGraphService = linkGraphService ?? null;
 
         // Initialize term frequency index FIRST (before createSearchIndex uses it)
         this.termFrequencyIndex = new TermFrequencyIndex();
 
         this.searchIndex = this.createSearchIndex();
-        this.persistence = new IndexPersistence();
-        this.usageTracker = new FileUsageTracker();
+        this.persistence = new IndexPersistence(app);
+        this.usageTracker = usageTracker ?? new FileUsageTracker(app);
         this.scorer = new ContentSearchScorer(settings);
         this.lastIndexOptions = this.getMiniSearchOptions();
 
@@ -76,13 +117,42 @@ export class EnhancedSearchService {
             this.persistence,
             this.usageTracker,
             this.persistence,
-            debounce(this.performFileIndexing.bind(this), settings.indexingDebounceMs),
+            this.performFileIndexing.bind(this),
             settings.indexingDebounceMs,
-            { enableContentSearch: settings.enableContentSearch },
+            { enableContentSearch: false },
         );
 
         // Create debounced cache save function to avoid excessive saves
-        this.debouncedCacheSave = debounce(this.saveIndexToCache.bind(this), 2000);
+        this.debouncedCacheSave = debounce(() => this.saveIndexToCache(), 2000);
+    }
+
+    /**
+     * Provide the link graph so PageRank feeds the `linkImportance` weight.
+     */
+    setLinkGraphService(service: LinkGraphService): void {
+        this.linkGraphService = service;
+    }
+
+    clearLinkGraphService(): void {
+        this.linkGraphService = null;
+    }
+
+    /**
+     * Fingerprint of options that change how documents are tokenized at index
+     * time. A persisted index built with different options is discarded.
+     */
+    private getIndexCompatibilityKey(): string {
+        const { foldAccents, enableStemming, synonyms } = this.lastIndexOptions;
+        const normalizedSynonyms = (synonyms || [])
+            .map((entry) => entry.trim())
+            .filter((entry) => entry.length > 0)
+            .sort();
+
+        return JSON.stringify({
+            foldAccents,
+            enableStemming,
+            synonyms: normalizedSynonyms,
+        });
     }
 
     private createSearchIndex(): SearchIndex {
@@ -112,8 +182,8 @@ export class EnhancedSearchService {
     }
 
     private haveIndexOptionsChanged(previous: MiniSearchAdapterOptions, next: MiniSearchAdapterOptions): boolean {
-        const baseChanged = previous.typoTolerance !== next.typoTolerance
-            || previous.foldAccents !== next.foldAccents
+        // typoTolerance is query-time only and applied through updateOptions
+        const baseChanged = previous.foldAccents !== next.foldAccents
             || previous.enableStemming !== next.enableStemming;
 
         if (baseChanged) return true;
@@ -132,6 +202,11 @@ export class EnhancedSearchService {
     }
 
     private requestCacheSave(): void {
+        if (this.bulkIndexingActive) {
+            this.cacheSavePending = true;
+            return;
+        }
+
         if (this.cacheSavePending) {
             return;
         }
@@ -142,18 +217,31 @@ export class EnhancedSearchService {
 
     private runWhenIdle(callback: () => Promise<void>, timeout = 1000): Promise<void> {
         return new Promise((resolve, reject) => {
+            if (this.isShuttingDown) {
+                resolve();
+                return;
+            }
+
             const executor = () => {
+                if (this.isShuttingDown) {
+                    resolve();
+                    return;
+                }
                 callback().then(resolve).catch(reject);
             };
 
             if (typeof window !== 'undefined' && 'requestIdleCallback' in window) {
-                requestIdleCallback(() => {
+                const idleId = requestIdleCallback(() => {
+                    this.scheduledIdleCallbacks.delete(idleId);
                     executor();
                 }, { timeout });
+                this.scheduledIdleCallbacks.add(idleId);
             } else {
-                setTimeout(() => {
+                const timeoutId = globalThis.setTimeout(() => {
+                    this.scheduledTimeouts.delete(timeoutId);
                     executor();
                 }, 0);
+                this.scheduledTimeouts.add(timeoutId);
             }
         });
     }
@@ -162,6 +250,56 @@ export class EnhancedSearchService {
         return new Promise((resolve) => {
             setTimeout(resolve, delay);
         });
+    }
+
+    private scheduleTimeout(callback: () => void, delayMs: number): void {
+        if (this.isShuttingDown) {
+            return;
+        }
+
+        const timeoutId = globalThis.setTimeout(() => {
+            this.scheduledTimeouts.delete(timeoutId);
+            if (!this.isShuttingDown) {
+                callback();
+            }
+        }, delayMs);
+
+        this.scheduledTimeouts.add(timeoutId);
+    }
+
+    private scheduleIdle(callback: () => Promise<void>, timeout = 1000): void {
+        if (this.isShuttingDown) {
+            return;
+        }
+
+        if (typeof window !== 'undefined' && 'requestIdleCallback' in window) {
+            const idleId = window.requestIdleCallback(() => {
+                this.scheduledIdleCallbacks.delete(idleId);
+                if (!this.isShuttingDown) {
+                    callback().catch((error) => {
+                        logger.error('Enhanced search: Idle task failed:', error);
+                    });
+                }
+            }, { timeout });
+            this.scheduledIdleCallbacks.add(idleId);
+            return;
+        }
+
+        this.scheduleTimeout(() => {
+            callback().catch((error) => {
+                logger.error('Enhanced search: Deferred task failed:', error);
+            });
+        }, 0);
+    }
+
+    private clearScheduledWork(): void {
+        this.scheduledTimeouts.forEach((timeoutId) => globalThis.clearTimeout(timeoutId));
+        this.scheduledTimeouts.clear();
+
+        if (typeof window !== 'undefined' && 'cancelIdleCallback' in window) {
+            this.scheduledIdleCallbacks.forEach((idleId) => window.cancelIdleCallback(idleId));
+        }
+        this.scheduledIdleCallbacks.clear();
     }
 
     /**
@@ -251,11 +389,6 @@ export class EnhancedSearchService {
                 logger.debug(`Enhanced search: Long search took ${duration}ms`);
             }
 
-            // Record search in usage tracker
-            if (this.settings.enableUsageTracking) {
-                this.usageTracker.recordSearch(query);
-            }
-
             return enhancedResults.slice(0, limit);
         } catch (error) {
             performanceMonitor.endTiming(operationId, 'search');
@@ -270,6 +403,7 @@ export class EnhancedSearchService {
         const recencyScore = this.settings.enableUsageTracking
             ? this.usageTracker.getRecencyScore(result.metadata.path) : 0;
         const lastOpened = this.usageTracker.getLastOpened(result.metadata.path);
+        const pageRankScore = this.linkGraphService?.getPageRankScore(result.metadata.path) ?? 0;
 
         const combinedScore = this.scorer.calculateCombinedScore({
             query,
@@ -278,6 +412,7 @@ export class EnhancedSearchService {
             recencyScore,
             metadata: result.metadata,
             lastOpened,
+            pageRankScore,
         });
 
         return {
@@ -313,9 +448,6 @@ export class EnhancedSearchService {
         try {
             const searchResults = await this.searchIndex.search(query, limit * 2);
             if (searchResults.length === 0) {
-                if (this.settings.enableUsageTracking && !signal?.aborted) {
-                    this.usageTracker.recordSearch(query);
-                }
                 onChunk?.([], { done: true, received: 0, total: 0 });
                 performanceMonitor.endTiming(operationId, 'search');
                 return;
@@ -350,10 +482,6 @@ export class EnhancedSearchService {
                 }
             }
 
-            if (this.settings.enableUsageTracking && !signal?.aborted) {
-                this.usageTracker.recordSearch(query);
-            }
-
             const duration = performanceMonitor.endTiming(operationId, 'search');
             if (duration > 1000) {
                 logger.debug(`Enhanced search: Long streaming search took ${duration}ms`);
@@ -380,6 +508,10 @@ export class EnhancedSearchService {
     recordSearchSelection(query: string, selectedPath: string): void {
         if (!this.isInitialized) {
             logger.warn('Enhanced search: Cannot record search selection - service not initialized');
+            return;
+        }
+
+        if (!this.settings.enableUsageTracking) {
             return;
         }
 
@@ -452,6 +584,24 @@ export class EnhancedSearchService {
      */
     async rebuildIndex(): Promise<void> {
         logger.debug('Enhanced search: Rebuilding entire index...');
+
+        // Don't let a pending save persist the pre-rebuild index under new options
+        this.debouncedCacheSave.cancel();
+        this.cacheSavePending = false;
+
+        // Stop any in-flight run first; otherwise indexVault() would join a run
+        // that started before the clear and leave the rebuilt index incomplete.
+        while (this.activeIndexingRun) {
+            // eslint-disable-next-line no-await-in-loop
+            await this.cancelActiveIndexing();
+        }
+
+        if (this.isShuttingDown) {
+            return;
+        }
+
+        this.cacheSnapshotTime = null;
+        this.staleCachedPaths.clear();
         await this.searchIndex.clear();
 
         // Clear the cached index as well
@@ -469,9 +619,25 @@ export class EnhancedSearchService {
      * Cleanup and shutdown
      */
     async shutdown(): Promise<void> {
+        this.isShuttingDown = true;
+        this.fileWatcherRefs.forEach((ref) => this.app.vault.offref(ref));
+        this.fileWatcherRefs = [];
+        this.clearScheduledWork();
+        this.debouncedCacheSave.cancel();
+        this.pendingRenames = [];
+
         if (this.indexingCoordinator) {
             await this.indexingCoordinator.shutdown();
         }
+
+        // Wait for the bulk run to observe the abort before closing persistence.
+        await this.cancelActiveIndexing();
+
+        if (this.cacheSavePending) {
+            await this.saveIndexToCache();
+        }
+
+        this.persistence.close();
         this.isInitialized = false;
     }
 
@@ -492,15 +658,48 @@ export class EnhancedSearchService {
      */
     pauseIndexing(): void {
         this.indexingPaused = true;
+        if (this.activeIndexingRun) {
+            // The bulk run stops at the next file boundary.
+            this.reconcileOnResume = true;
+        }
         logger.debug('Enhanced search: Indexing paused');
     }
 
     /**
-     * Resume indexing
+     * Resume indexing, replaying renames and reconciling changes skipped while paused
      */
     resumeIndexing(): void {
         this.indexingPaused = false;
         logger.debug('Enhanced search: Indexing resumed');
+
+        if (!this.isInitialized || this.isShuttingDown) {
+            return;
+        }
+
+        const renames = this.pendingRenames;
+        this.pendingRenames = [];
+        renames.forEach(({ oldPath, newPath }) => {
+            this.handleFileRename(oldPath, newPath).catch((error) => {
+                logger.error(`Enhanced search: Failed to replay rename ${oldPath} -> ${newPath}:`, error);
+            });
+        });
+
+        if (this.reconcileOnResume) {
+            this.reconcileOnResume = false;
+            const reconcile = () => {
+                this.indexVault().catch((error) => {
+                    logger.error('Enhanced search: Reconciliation after resume failed:', error);
+                });
+            };
+
+            // A run that has not yet observed the pause simply continues; a fresh
+            // pass afterwards picks up edits skipped while paused.
+            if (this.activeIndexingRun) {
+                this.activeIndexingRun.then(reconcile, reconcile);
+            } else {
+                reconcile();
+            }
+        }
     }
 
     /**
@@ -519,7 +718,7 @@ export class EnhancedSearchService {
         isPaused: boolean;
     } {
         return {
-            isIndexing: this.isIndexing,
+            isIndexing: this.activeIndexingRun !== null,
             currentStats: this.searchIndex.getStats(),
             isPaused: this.indexingPaused,
         };
@@ -539,121 +738,75 @@ export class EnhancedSearchService {
         return this.termFrequencyIndex;
     }
 
+    /**
+     * Load the persisted index. A schema-compatible, readable cache is always
+     * kept; staleness is reconciled incrementally by indexVault(). The cache is
+     * only discarded when its schema/options are incompatible or it is corrupt.
+     */
     private async loadPersistedData(): Promise<void> {
+        let loaded: LoadedSearchIndex;
         try {
-            // Load search index
-            const indexData = await this.persistence.loadSearchIndex();
-            if (indexData && indexData.index) {
-                logger.debug('Enhanced search: Loading cached search index...');
-                await this.searchIndex.loadFromData(indexData);
-                logger.debug(`Enhanced search: Loaded cached index with ${indexData.stats?.documentCount || 0} documents`);
+            loaded = await this.persistence.loadSearchIndex(this.getIndexCompatibilityKey());
+        } catch (error) {
+            logger.warn('Enhanced search: Failed to read cached search index:', error);
+            await this.discardPersistedIndex('cache unreadable');
+            return;
+        }
 
-                // Verify cache is still valid by checking file modifications
-                const cacheValid = await this.validateCache(indexData);
-                if (!cacheValid) {
-                    logger.debug('[Enhanced Search] Cache is outdated, clearing index for rebuild');
-                    logger.debug('Enhanced search: Cache is outdated, will rebuild index');
-                    await this.searchIndex.clear();
-                    // Also clear metadata to avoid inconsistent state
-                    try {
-                        await this.persistence.clear();
-                        logger.debug('[Enhanced Search] Cleared persistence metadata');
-                        logger.debug('Enhanced search: Cleared cached metadata to match cleared index');
-                    } catch (error) {
-                        logger.warn('Enhanced search: Failed to clear cached metadata:', error);
-                    }
-                } else {
-                    logger.debug('Enhanced search: Cache is valid, skipping full reindex');
-                    // Cache is valid, no need to reindex everything
-                }
-            } else {
-                logger.debug('Enhanced search: No cached index found, will build from scratch');
+        if (loaded.status === 'missing') {
+            logger.debug('Enhanced search: No cached index found, will build from scratch');
+            return;
+        }
+
+        if (loaded.status === 'incompatible') {
+            await this.discardPersistedIndex(loaded.reason);
+            return;
+        }
+
+        try {
+            const indexData = loaded.data;
+            if (!indexData.index || !Array.isArray(indexData.documents)) {
+                throw new Error('Cached index has an unexpected shape');
             }
 
-            // Usage data is loaded automatically by the tracker
+            await this.searchIndex.loadFromData(indexData);
+
+            const snapshotAt = Number(indexData.snapshotAt) || loaded.savedAt;
+            this.cacheSnapshotTime = snapshotAt;
+            logger.debug(`Enhanced search: Loaded cached index with ${indexData.documents.length} documents (snapshot ${new Date(snapshotAt).toISOString()}); changes will be reconciled incrementally`);
         } catch (error) {
-            logger.warn('Failed to load persisted search data:', error);
-            // If loading fails, we'll just rebuild from scratch
-            await this.searchIndex.clear();
+            logger.warn('Enhanced search: Cached index is corrupt, rebuilding:', error);
+            await this.discardPersistedIndex('corrupt cache');
         }
     }
 
     /**
-     * Validate if the cached index is still valid by checking file modifications
-     * Uses sampling to avoid checking every file for large vaults
+     * Drop the in-memory index and all persisted index data so the next
+     * indexVault() run rebuilds from scratch.
      */
-    private async validateCache(indexData: any): Promise<boolean> {
+    private async discardPersistedIndex(reason: string): Promise<void> {
+        logger.debug(`Enhanced search: Discarding cached index (${reason})`);
+        this.cacheSnapshotTime = null;
+        this.staleCachedPaths.clear();
+        await this.searchIndex.clear();
+
         try {
-            if (!indexData.stats?.lastUpdated) {
-                return false; // No timestamp, cache is invalid
-            }
-
-            // Check if TermFrequencyIndex data exists (required for IDF-based scoring)
-            if (!indexData.termFrequencyIndex) {
-                logger.debug('[Enhanced Search] Cache missing TermFrequencyIndex data, will rebuild');
-                return false;
-            }
-
-            // Log TermFrequencyIndex stats from cache
-            try {
-                const tfStats = indexData.termFrequencyIndex;
-                logger.debug(`[Enhanced Search] Cache has TermFrequencyIndex: version=${tfStats.version}, docs=${tfStats.totalDocuments}, terms=${tfStats.termDocCount?.length ?? 0}`);
-            } catch (e) {
-                logger.debug('[Enhanced Search] Failed to log TermFrequencyIndex stats:', e);
-            }
-
-            const cacheTimestamp = indexData.stats.lastUpdated;
-            const files = this.app.vault.getMarkdownFiles();
-
-            // Check if the number of files has changed significantly first (quick check)
-            const currentFileCount = files.length;
-            const cachedFileCount = indexData.stats?.documentCount || 0;
-
-            if (Math.abs(currentFileCount - cachedFileCount) > Math.max(1, currentFileCount * 0.1)) {
-                logger.debug(`Enhanced search: File count changed significantly (${currentFileCount} vs ${cachedFileCount})`);
-                return false;
-            }
-
-            // For large vaults, only check a sample of files to avoid long validation times
-            const sampleSize = Math.min(files.length, 50); // Check max 50 files
-            const filesToCheck = files.length > sampleSize
-                ? this.sampleArray(files, sampleSize) : files;
-
-            logger.debug(`Enhanced search: Checking ${filesToCheck.length} files for modifications (sampling from ${files.length} total)`);
-
-            // Check if any sampled files have been modified since the cache was created
-            for (const file of filesToCheck) {
-                if (file.stat.mtime > cacheTimestamp) {
-                    logger.debug(`Enhanced search: File ${file.path} modified since cache (${new Date(file.stat.mtime).toISOString()} > ${new Date(cacheTimestamp).toISOString()})`);
-                    return false;
-                }
-            }
-
-            logger.debug(`Enhanced search: Cache is valid (${cachedFileCount} files, last updated ${new Date(cacheTimestamp).toISOString()})`);
-            return true;
+            // Clears per-file metadata and the serialized index record.
+            await this.persistence.clear();
         } catch (error) {
-            logger.warn('Enhanced search: Failed to validate cache:', error);
-            return false;
+            logger.warn('Enhanced search: Failed to clear cached metadata:', error);
         }
     }
 
-    /**
-     * Sample an array to get a representative subset
-     */
-    private sampleArray<T>(array: T[], sampleSize: number): T[] {
-        if (array.length <= sampleSize) {
-            return array;
+    private getIndexableMarkdownFiles(files = this.app.vault.getMarkdownFiles()): TFile[] {
+        const maxIndexedFiles = Math.max(0, this.settings.maxIndexedFiles || files.length);
+        const sortedFiles = [...files].sort((a, b) => a.path.localeCompare(b.path));
+
+        if (maxIndexedFiles <= 0) {
+            return sortedFiles;
         }
 
-        const sampled: T[] = [];
-        const step = array.length / sampleSize;
-
-        for (let i = 0; i < sampleSize; i++) {
-            const index = Math.floor(i * step);
-            sampled.push(array[index]);
-        }
-
-        return sampled;
+        return sortedFiles.slice(0, maxIndexedFiles);
     }
 
     /**
@@ -661,8 +814,14 @@ export class EnhancedSearchService {
      */
     private async saveIndexToCache(): Promise<void> {
         try {
+            // Taken before serializing: everything indexed before this instant
+            // is part of the snapshot (see doesFileNeedIndexing).
+            const snapshotAt = Date.now();
             const indexData = await this.searchIndex.serialize();
-            await this.persistence.saveSearchIndex(indexData);
+            if (indexData && typeof indexData === 'object') {
+                indexData.snapshotAt = snapshotAt;
+            }
+            await this.persistence.saveSearchIndex(indexData, this.getIndexCompatibilityKey());
             logger.debug('Enhanced search: Index saved to cache');
         } catch (error) {
             logger.warn('Enhanced search: Failed to save index to cache:', error);
@@ -672,67 +831,71 @@ export class EnhancedSearchService {
     }
 
     private setupFileWatchers(): void {
+        if (this.fileWatcherRefs.length > 0) {
+            return;
+        }
+
         // Watch for file modifications
-        this.app.vault.on('modify', (file: TFile) => {
+        this.fileWatcherRefs.push(this.app.vault.on('modify', (file: TAbstractFile) => {
             if (file instanceof TFile && file.extension === 'md') {
                 this.handleFileChange(file.path, 'modify');
             }
-        });
+        }));
 
         // Watch for file creation
-        this.app.vault.on('create', (file: TFile) => {
+        this.fileWatcherRefs.push(this.app.vault.on('create', (file: TAbstractFile) => {
             if (file instanceof TFile && file.extension === 'md') {
                 this.handleFileChange(file.path, 'create');
                 if (this.settings.enableUsageTracking) {
                     this.usageTracker.recordFileCreate(file.path);
                 }
             }
-        });
+        }));
 
         // Watch for file deletion
-        this.app.vault.on('delete', (file: TFile) => {
-            if (file instanceof TFile && file.extension === 'md') {
+        this.fileWatcherRefs.push(this.app.vault.on('delete', (file: TAbstractFile) => {
+            if (!(file instanceof TFile)) {
+                return;
+            }
+
+            // Usage data is kept for any file type (non-markdown files can be opened too)
+            this.usageTracker.deleteFile(file.path);
+
+            if (file.extension === 'md') {
                 this.handleFileChange(file.path, 'delete');
             }
-        });
+        }));
 
         // Watch for file renames
-        this.app.vault.on('rename', (file: TFile, oldPath: string) => {
-            if (file instanceof TFile && file.extension === 'md') {
+        this.fileWatcherRefs.push(this.app.vault.on('rename', (file: TAbstractFile, oldPath: string) => {
+            if (!(file instanceof TFile)) {
+                return;
+            }
+
+            this.usageTracker.renameFile(oldPath, file.path);
+
+            // Also handle extension changes away from .md so the old entry is removed
+            if (file.extension === 'md' || oldPath.endsWith('.md')) {
                 this.handleFileRename(oldPath, file.path);
             }
-        });
+        }));
     }
 
     private async handleFileChange(filePath: string, operation: 'create' | 'modify' | 'delete'): Promise<void> {
         try {
             // Skip indexing if paused (except for deletes which should always be processed)
             if (this.indexingPaused && operation !== 'delete') {
-                logger.debug(`Enhanced search: Skipping ${operation} for ${filePath} (indexing paused)`);
+                logger.debug(`Enhanced search: Deferring ${operation} for ${filePath} (indexing paused)`);
+                this.reconcileOnResume = true;
                 return;
             }
 
             // Use requestIdleCallback with a longer timeout to ensure indexing happens
             // during idle periods, preventing UI lag during active file switching
             const scheduleIndexing = () => {
-                if ('requestIdleCallback' in window) {
-                    requestIdleCallback(async () => {
-                        try {
-                            await this.indexingCoordinator.scheduleFileUpdate(filePath, operation);
-                        } catch (error) {
-                            logger.error(`Failed to schedule file update for ${filePath}:`, error);
-                        }
-                    }, { timeout: 2000 }); // 2 second timeout for important updates
-                } else {
-                    // Fallback for environments without requestIdleCallback
-                    setTimeout(async () => {
-                        try {
-                            await this.indexingCoordinator.scheduleFileUpdate(filePath, operation);
-                        } catch (error) {
-                            logger.error(`Failed to schedule file update for ${filePath}:`, error);
-                        }
-                    }, 50); // Small delay to let UI update first
-                }
+                this.scheduleIdle(async () => {
+                    await this.indexingCoordinator.scheduleFileUpdate(filePath, operation);
+                }, 2000);
             };
 
             // For delete operations, schedule immediately but still async
@@ -740,7 +903,7 @@ export class EnhancedSearchService {
                 scheduleIndexing();
             } else {
                 // For create/modify operations, add additional delay to reduce impact on file switching
-                setTimeout(scheduleIndexing, 200);
+                this.scheduleTimeout(scheduleIndexing, 200);
             }
         } catch (error) {
             logger.error(`Failed to handle file change for ${filePath}:`, error);
@@ -749,33 +912,19 @@ export class EnhancedSearchService {
 
     private async handleFileRename(oldPath: string, newPath: string): Promise<void> {
         try {
-            // Skip indexing if paused
+            // Queue while paused so the old path does not linger in the index
             if (this.indexingPaused) {
-                logger.debug(`Enhanced search: Skipping rename for ${oldPath} to ${newPath} (indexing paused)`);
+                logger.debug(`Enhanced search: Queueing rename ${oldPath} -> ${newPath} (indexing paused)`);
+                this.pendingRenames.push({ oldPath, newPath });
                 return;
             }
 
             // Use requestIdleCallback with a longer timeout to ensure indexing happens
             // during idle periods, preventing UI lag during active file switching
             const scheduleIndexing = () => {
-                if ('requestIdleCallback' in window) {
-                    requestIdleCallback(async () => {
-                        try {
-                            await this.indexingCoordinator.renameFile(oldPath, newPath);
-                        } catch (error) {
-                            logger.error(`Failed to handle file rename for ${oldPath} to ${newPath}:`, error);
-                        }
-                    }, { timeout: 2000 }); // 2 second timeout for important updates
-                } else {
-                    // Fallback for environments without requestIdleCallback
-                    setTimeout(async () => {
-                        try {
-                            await this.indexingCoordinator.renameFile(oldPath, newPath);
-                        } catch (error) {
-                            logger.error(`Failed to handle file rename for ${oldPath} to ${newPath}:`, error);
-                        }
-                    }, 50); // Small delay to let UI update first
-                }
+                this.scheduleIdle(async () => {
+                    await this.indexingCoordinator.renameFile(oldPath, newPath);
+                }, 2000);
             };
 
             // Schedule the rename operation
@@ -785,13 +934,55 @@ export class EnhancedSearchService {
         }
     }
 
-    private async indexVault(): Promise<void> {
-        if (this.isIndexing) {
-            logger.debug('Enhanced search: Indexing already in progress, skipping');
+    /**
+     * Start a vault indexing run, or join the one already in progress.
+     * Use cancelActiveIndexing() first when a fresh run is required.
+     */
+    private indexVault(): Promise<void> {
+        if (this.activeIndexingRun) {
+            logger.debug('Enhanced search: Indexing already in progress, joining current run');
+            return this.activeIndexingRun;
+        }
+
+        if (this.isShuttingDown) {
+            return Promise.resolve();
+        }
+
+        const controller = new AbortController();
+        this.indexingAbort = controller;
+
+        const run = this.runVaultIndexing(controller.signal).finally(() => {
+            if (this.activeIndexingRun === run) {
+                this.activeIndexingRun = null;
+                this.indexingAbort = null;
+            }
+        });
+        this.activeIndexingRun = run;
+        return run;
+    }
+
+    /**
+     * Abort the in-flight indexing run (if any) and wait for it to stop.
+     */
+    private async cancelActiveIndexing(): Promise<void> {
+        const run = this.activeIndexingRun;
+        if (!run) {
             return;
         }
 
-        this.isIndexing = true;
+        this.indexingAbort?.abort();
+        try {
+            await run;
+        } catch {
+            // Failure is already logged by the run itself
+        }
+    }
+
+    private shouldStopIndexing(signal: AbortSignal): boolean {
+        return signal.aborted || this.isShuttingDown || this.indexingPaused;
+    }
+
+    private async runVaultIndexing(signal: AbortSignal): Promise<void> {
         const operationId = `index-vault-${Date.now()}`;
         performanceMonitor.startTiming(operationId);
 
@@ -803,12 +994,13 @@ export class EnhancedSearchService {
             }
 
             const files = this.app.vault.getMarkdownFiles();
+            const allFiles = this.getIndexableMarkdownFiles(files);
             logger.debug(`Enhanced search: Found ${files.length} markdown files to check`);
 
             if (files.length === 0) {
                 logger.warn('Enhanced search: No markdown files found. This might indicate the vault is not fully loaded yet.');
                 // Try again after a short delay
-                setTimeout(() => {
+                this.scheduleTimeout(() => {
                     logger.debug('Enhanced search: Retrying vault indexing...');
                     this.indexVault().catch((error) => {
                         logger.error('Enhanced search: Retry failed:', error);
@@ -817,28 +1009,37 @@ export class EnhancedSearchService {
                 return;
             }
 
-            // Limit the number of files to index based on settings
-            const allFiles = files.slice(0, this.settings.maxIndexedFiles);
-
             if (allFiles.length < files.length) {
                 logger.warn(`Indexing limited to ${this.settings.maxIndexedFiles} files out of ${files.length} total`);
             }
 
-            // Filter out files that are already indexed and up-to-date
-            logger.debug(`[Enhanced Search] Checking ${allFiles.length} files for indexing needs...`);
-            const filesToIndex = await this.getFilesNeedingIndexing(allFiles);
-            logger.debug(`[Enhanced Search] getFilesNeedingIndexing returned ${filesToIndex.length} files to index`);
-
-            if (filesToIndex.length === 0) {
-                logger.debug('[Enhanced Search] No files need indexing - this is unexpected after cache clear!');
-                logger.debug('Enhanced search: All files are already indexed and up-to-date');
-                performanceMonitor.endTiming(operationId, 'indexing');
+            await this.removeStaleIndexedDocuments(allFiles, signal);
+            if (this.shouldStopIndexing(signal)) {
+                this.noteInterruptedRun();
                 return;
             }
 
-            logger.debug(`[Enhanced Search] Starting to index ${filesToIndex.length} files`);
+            // Filter out files that are already indexed and up-to-date
+            const filesToIndex = await this.getFilesNeedingIndexing(allFiles, signal);
+            if (this.shouldStopIndexing(signal)) {
+                this.noteInterruptedRun();
+                return;
+            }
+
+            // Every file has now been compared against the loaded snapshot; the
+            // ones it could not vouch for are tracked in staleCachedPaths.
+            this.cacheSnapshotTime = null;
+
+            if (filesToIndex.length === 0) {
+                logger.debug('Enhanced search: All files are already indexed and up-to-date');
+                if (this.cacheSavePending) {
+                    await this.saveIndexToCache();
+                }
+                return;
+            }
+
             logger.debug(`Enhanced search: Found ${filesToIndex.length} files that need indexing (${allFiles.length - filesToIndex.length} already cached)`);
-            logger.debug(`Enhanced search: Starting to index ${filesToIndex.length} files`);
+            this.bulkIndexingActive = true;
 
             const baseBatchSize = Math.max(1, this.settings.indexingBatchSize || 3);
             const dynamicBatchSize = filesToIndex.length > 200
@@ -862,12 +1063,12 @@ export class EnhancedSearchService {
 
                 // Process files sequentially within batch to reduce load
                 for (const file of batch) {
-                    // Check if indexing has been paused
-                    if (this.indexingPaused) {
-                        logger.debug('Enhanced search: Indexing paused by user, stopping vault indexing');
+                    // Stop on pause, rebuild (abort) or shutdown
+                    if (this.shouldStopIndexing(signal)) {
+                        logger.debug('Enhanced search: Vault indexing interrupted (paused, cancelled or shutting down)');
+                        this.noteInterruptedRun();
                         return;
                     }
-
 
                     try {
                         // Call internal method directly to avoid double runWhenIdle wrapper
@@ -897,18 +1098,35 @@ export class EnhancedSearchService {
                 }
             }
 
+            if (this.shouldStopIndexing(signal)) {
+                this.noteInterruptedRun();
+                return;
+            }
+
             logger.debug('Enhanced search: Vault indexing completed');
 
             // Save the index to cache after successful indexing
             await this.saveIndexToCache();
-
-            performanceMonitor.endTiming(operationId, 'indexing');
         } catch (error) {
-            performanceMonitor.endTiming(operationId, 'indexing');
             logger.error('Failed to index vault:', error);
             throw error;
         } finally {
-            this.isIndexing = false;
+            performanceMonitor.endTiming(operationId, 'indexing');
+            this.bulkIndexingActive = false;
+            // Saves requested during the bulk run were deferred; flush them now
+            // unless the run already saved or we are shutting down.
+            if (this.cacheSavePending && !this.isShuttingDown) {
+                this.debouncedCacheSave();
+            }
+        }
+    }
+
+    /**
+     * Record that a run stopped early so resuming reconciles the remainder.
+     */
+    private noteInterruptedRun(): void {
+        if (this.indexingPaused) {
+            this.reconcileOnResume = true;
         }
     }
 
@@ -929,16 +1147,8 @@ export class EnhancedSearchService {
         const startTime = Date.now();
         try {
             if (operation === 'delete') {
-                await this.searchIndex.removeDocument(filePath);
-
-                try {
-                    await this.persistence.delete(filePath);
-                } catch (error) {
-                    logger.warn(`Failed to clean up metadata for deleted file ${filePath}:`, error);
-                }
-
+                await this.removeFromIndex(filePath);
                 logger.debug(`Enhanced search: Removed ${filePath} from index (${Date.now() - startTime}ms)`);
-                this.requestCacheSave();
                 return;
             }
 
@@ -950,18 +1160,38 @@ export class EnhancedSearchService {
             const maxFileSize = this.settings.maxFileSize || (512 * 1024);
             if (file.stat.size > maxFileSize) {
                 logger.warn(`Enhanced search: Skipping large file ${filePath} (${Math.round(file.stat.size / 1024)}KB)`);
+                // Drop any previously indexed (now stale) content
+                await this.removeFromIndexIfPresent(filePath);
                 return;
             }
 
             // For indexVault loop, better to read content sequentially than Promise.all which might race
             const metadata = this.extractFileMetadata(file);
             const content = await this.app.vault.read(file);
+            const contentHash = generateContentHashBase36(content);
 
             if (!content || content.trim().length === 0) {
+                // A note edited down to nothing should no longer match old content
+                await this.removeFromIndexIfPresent(filePath);
                 return;
             }
 
-            await this.indexDocumentAsync(filePath, content, metadata);
+            const existingMetadata = await this.persistence.getMetadata(filePath);
+            if (operation === 'modify'
+                && existingMetadata
+                && existingMetadata.contentHash === contentHash
+                && this.searchIndex.hasDocument(filePath)
+                && !this.staleCachedPaths.has(filePath)) {
+                await this.persistence.setMetadata(filePath, {
+                    ...existingMetadata,
+                    lastModified: file.stat.mtime,
+                    indexedAt: Date.now(),
+                });
+                return;
+            }
+
+            await this.indexDocumentAsync(filePath, content, metadata, contentHash);
+            this.staleCachedPaths.delete(filePath);
 
             const duration = Date.now() - startTime;
             if (duration > 100) {
@@ -975,10 +1205,40 @@ export class EnhancedSearchService {
     }
 
     /**
+     * Remove a document and its indexing metadata.
+     */
+    private async removeFromIndex(filePath: string): Promise<void> {
+        await this.searchIndex.removeDocument(filePath);
+        this.staleCachedPaths.delete(filePath);
+
+        try {
+            await this.persistence.delete(filePath);
+        } catch (error) {
+            logger.warn(`Failed to clean up metadata for ${filePath}:`, error);
+        }
+
+        this.requestCacheSave();
+    }
+
+    private async removeFromIndexIfPresent(filePath: string): Promise<void> {
+        if (this.searchIndex.hasDocument(filePath)) {
+            await this.removeFromIndex(filePath);
+            return;
+        }
+
+        this.staleCachedPaths.delete(filePath);
+    }
+
+    /**
      * Index a document asynchronously with yield points
      * Also saves cache periodically for incremental updates and stores indexing metadata
      */
-    private async indexDocumentAsync(filePath: string, content: string, metadata: any): Promise<void> {
+    private async indexDocumentAsync(
+        filePath: string,
+        content: string,
+        metadata: any,
+        contentHash = generateContentHashBase36(content),
+    ): Promise<void> {
         // Index the document with correct signature: (id, content, metadata)
         await this.searchIndex.addDocument(filePath, content, metadata);
 
@@ -986,23 +1246,11 @@ export class EnhancedSearchService {
         await this.persistence.setMetadata(filePath, {
             lastModified: metadata.lastModified,
             indexedAt: Date.now(),
-            contentHash: generateContentHashBase36(content),
+            contentHash,
             size: content.length,
         });
 
-        // Store content if enabled (but don't block on it)
-        if (this.settings.enableContentSearch) {
-            this.persistence.set(filePath, content).catch((error) => {
-                logger.warn(`Failed to store content for ${filePath}:`, error);
-            });
-        }
-
-        // Periodically save cache for incremental updates (every 50 files) to reduce write churn
-        const stats = this.searchIndex.getStats();
-        if (stats.documentCount % 50 === 0) {
-            // Schedule cache save in background, don't block indexing
-            this.requestCacheSave();
-        }
+        // MiniSearch keeps the searchable text it needs; avoid persisting full file content.
     }
 
     /**
@@ -1010,17 +1258,40 @@ export class EnhancedSearchService {
      */
     private async isCacheAvailable(): Promise<boolean> {
         try {
-            const indexData = await this.persistence.loadSearchIndex();
-            return !!(indexData && indexData.index);
+            const loaded = await this.persistence.loadSearchIndex(this.getIndexCompatibilityKey());
+            return loaded.status === 'ok' && !!loaded.data?.index;
         } catch (error) {
             return false;
+        }
+    }
+
+    private async removeStaleIndexedDocuments(currentMarkdownFiles: TFile[], signal?: AbortSignal): Promise<void> {
+        if (!this.searchIndex.getDocumentIds) {
+            return;
+        }
+
+        const currentPaths = new Set(currentMarkdownFiles.map((file) => file.path));
+        const indexedPaths = this.searchIndex.getDocumentIds();
+        const stalePaths = indexedPaths.filter((path) => !currentPaths.has(path));
+
+        if (stalePaths.length === 0) {
+            return;
+        }
+
+        logger.debug(`Enhanced search: Removing ${stalePaths.length} stale indexed documents`);
+        for (const path of stalePaths) {
+            if (signal && this.shouldStopIndexing(signal)) {
+                return;
+            }
+            // eslint-disable-next-line no-await-in-loop
+            await this.performFileIndexingInternal(path, 'delete');
         }
     }
 
     /**
      * Get files that need indexing (new or modified since last index)
      */
-    private async getFilesNeedingIndexing(allFiles: TFile[]): Promise<TFile[]> {
+    private async getFilesNeedingIndexing(allFiles: TFile[], signal?: AbortSignal): Promise<TFile[]> {
         const filesToIndex: TFile[] = [];
         logger.debug(`Enhanced search: Checking ${allFiles.length} files for indexing needs`);
 
@@ -1033,6 +1304,10 @@ export class EnhancedSearchService {
 
         const workers = Array.from({ length: concurrency }, async () => {
             while (cursor < allFiles.length) {
+                if (signal && this.shouldStopIndexing(signal)) {
+                    return;
+                }
+
                 const index = cursor;
                 cursor += 1;
 
@@ -1056,8 +1331,11 @@ export class EnhancedSearchService {
 
     private async doesFileNeedIndexing(file: TFile): Promise<boolean> {
         try {
+            if (this.staleCachedPaths.has(file.path)) {
+                return true;
+            }
+
             const metadata = await this.persistence.getMetadata(file.path);
-            logger.debug(`Enhanced search: Metadata check for ${file.path}:`, metadata ? 'found' : 'not found');
 
             if (!metadata) {
                 logger.debug(`Enhanced search: File ${file.path} has no metadata, needs indexing`);
@@ -1074,7 +1352,14 @@ export class EnhancedSearchService {
                 return true;
             }
 
-            logger.debug(`Enhanced search: File ${file.path} is up to date (indexed ${new Date(metadata.indexedAt).toISOString()})`);
+            // Indexed after the loaded snapshot was taken (e.g. the debounced
+            // cache save never ran): the cached entry may hold old content.
+            if (this.cacheSnapshotTime !== null && metadata.indexedAt > this.cacheSnapshotTime) {
+                logger.debug(`Enhanced search: File ${file.path} was indexed after the cached snapshot, needs reindexing`);
+                this.staleCachedPaths.add(file.path);
+                return true;
+            }
+
             return false;
         } catch (error) {
             logger.warn(`Enhanced search: Error checking metadata for ${file.path}, will reindex:`, error);
@@ -1115,4 +1400,3 @@ export class EnhancedSearchService {
         return [];
     }
 }
-

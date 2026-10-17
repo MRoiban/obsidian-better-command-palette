@@ -10,6 +10,11 @@
 import { App, TFile, MetadataCache, Vault } from 'obsidian';
 import { logger } from '../utils/logger';
 import { SmartScheduler } from '../utils/smart-scheduler';
+import {
+    readVaultScopedLocalStorage,
+    removeVaultScopedLocalStorage,
+    writeVaultScopedLocalStorage,
+} from '../utils/vault-storage';
 
 /**
  * Configuration for PageRank calculation
@@ -49,6 +54,8 @@ interface GraphNode {
  * Link Graph Service for computing PageRank-style importance scores
  */
 export class LinkGraphService {
+    private app: App;
+
     private vault: Vault;
 
     private metadataCache: MetadataCache;
@@ -63,7 +70,7 @@ export class LinkGraphService {
 
     private lastComputeTime = 0;
 
-
+    private readonly cacheTtlMs = 60 * 60 * 1000;
 
     private storageKey = 'better-command-palette-link-graph';
 
@@ -74,6 +81,7 @@ export class LinkGraphService {
         app: App,
         settings: LinkGraphSettings = DEFAULT_LINK_GRAPH_SETTINGS,
     ) {
+        this.app = app;
         this.vault = app.vault;
         this.metadataCache = app.metadataCache;
         this.settings = settings;
@@ -111,6 +119,20 @@ export class LinkGraphService {
         // Always return cached value - never trigger recompute during lookup
         // The scheduler handles background recomputation after file changes
         return this.pageRanks.get(path) ?? 0;
+    }
+
+    shouldRecomputeOnStartup(): boolean {
+        if (!this.settings.enabled) {
+            return false;
+        }
+
+        return !this.hasFreshCachedScores();
+    }
+
+    private hasFreshCachedScores(): boolean {
+        return this.isComputed
+            && this.pageRanks.size > 0
+            && Date.now() - this.lastComputeTime < this.cacheTtlMs;
     }
 
     /**
@@ -341,6 +363,7 @@ export class LinkGraphService {
      */
     onFileCreate(file: TFile): void {
         if (file.extension !== 'md') return;
+        if (!this.ensureGraphReadyForIncrementalUpdate(file.path)) return;
 
         this.graph.set(file.path, {
             path: file.path,
@@ -357,6 +380,8 @@ export class LinkGraphService {
      * Handle file deletion - remove from graph
      */
     onFileDelete(path: string): void {
+        if (!this.ensureGraphReadyForIncrementalUpdate(path)) return;
+
         const node = this.graph.get(path);
         if (!node) return;
 
@@ -382,6 +407,8 @@ export class LinkGraphService {
      * Handle file rename - update graph
      */
     onFileRename(oldPath: string, newPath: string): void {
+        if (!this.ensureGraphReadyForIncrementalUpdate(newPath)) return;
+
         const node = this.graph.get(oldPath);
         if (!node) return;
 
@@ -415,6 +442,9 @@ export class LinkGraphService {
             this.pageRanks.delete(oldPath);
             this.pageRanks.set(newPath, score);
         }
+
+        this.isComputed = false;
+        this.queueUpdate(newPath);
     }
 
     /**
@@ -423,6 +453,7 @@ export class LinkGraphService {
     async onFileModify(file: TFile): Promise<void> {
         logger.debug('[LinkGraph] onFileModify called:', file.path);
         if (file.extension !== 'md') return;
+        if (!this.ensureGraphReadyForIncrementalUpdate(file.path)) return;
 
         const node = this.graph.get(file.path);
         if (!node) {
@@ -473,6 +504,21 @@ export class LinkGraphService {
         this.scheduler.schedule(path);
     }
 
+    private ensureGraphReadyForIncrementalUpdate(path: string): boolean {
+        if (this.graph.size > 0) {
+            return true;
+        }
+
+        if (this.pageRanks.size > 0) {
+            logger.debug(`Link graph: Cached scores are loaded without graph structure; scheduling full rebuild after update to ${path}`);
+            this.isComputed = false;
+            this.queueUpdate(path);
+            return false;
+        }
+
+        return true;
+    }
+
     /**
      * Process scheduled updates and recompute PageRank
      */
@@ -480,15 +526,17 @@ export class LinkGraphService {
         logger.debug('[LinkGraph] processScheduledRecompute called');
         logger.debug('Link graph: Processing scheduled recompute');
 
-        // Recompute the entire graph
-        // (For large vaults, could optimize to only update affected nodes)
         try {
-            logger.debug('[LinkGraph] Starting recompute...');
-            await this.recompute();
-            logger.debug('[LinkGraph] Recompute complete!');
-            logger.debug('Link graph: Recompute complete');
+            if (this.graph.size === 0) {
+                logger.debug('[LinkGraph] Graph is empty, starting full recompute...');
+                await this.recompute();
+                logger.debug('[LinkGraph] Full recompute complete');
+            } else {
+                logger.debug('[LinkGraph] Recomputing PageRank on updated graph...');
+                this.computePageRank();
+                logger.debug('[LinkGraph] PageRank update complete');
+            }
         } catch (error) {
-            console.error('[LinkGraph] Recompute failed:', error);
             logger.error('Link graph: Failed to recompute after updates', error);
         }
     }
@@ -542,7 +590,7 @@ export class LinkGraphService {
                 timestamp: Date.now(),
                 scores: Array.from(this.pageRanks.entries()),
             };
-            localStorage.setItem(this.storageKey, JSON.stringify(data));
+            writeVaultScopedLocalStorage(this.app, this.storageKey, JSON.stringify(data));
         } catch (error) {
             logger.warn('Link graph: Failed to save to storage', error);
         }
@@ -553,7 +601,7 @@ export class LinkGraphService {
      */
     private loadFromStorage(): void {
         try {
-            const stored = localStorage.getItem(this.storageKey);
+            const stored = readVaultScopedLocalStorage(this.app, this.storageKey);
             if (!stored) return;
 
             const data = JSON.parse(stored);
@@ -561,8 +609,9 @@ export class LinkGraphService {
                 this.pageRanks = new Map(data.scores);
                 // Consider cached data valid for 1 hour
                 const cacheAge = Date.now() - (data.timestamp || 0);
-                if (cacheAge < 60 * 60 * 1000) {
+                if (cacheAge < this.cacheTtlMs) {
                     this.isComputed = true;
+                    this.lastComputeTime = data.timestamp || Date.now();
                     logger.debug('Link graph: Loaded cached PageRank scores');
                 }
             }
@@ -578,6 +627,10 @@ export class LinkGraphService {
         this.graph.clear();
         this.pageRanks.clear();
         this.isComputed = false;
-        localStorage.removeItem(this.storageKey);
+        removeVaultScopedLocalStorage(this.app, this.storageKey);
+    }
+
+    destroy(): void {
+        this.scheduler.destroy();
     }
 }

@@ -15,6 +15,7 @@
 		"build-local": "NODE_ENV=production DEST=local rollup --config rollup.config.js",
 		"version": "node version-bump.mjs && git add manifest.json versions.json",
 		"test:lint": "eslint .",
+		"test:typecheck": "tsc --noEmit",
 		"test:e2e": "TYPE=test rollup --config rollup.config.js -w",
 		"test:e2e-build": "TYPE=test rollup --config rollup.config.js",
 		"tool:gen-files": "node ./tools/generate-test-files.js",
@@ -47,10 +48,11 @@
 		"rollup-plugin-web-worker-loader": "^1.6.1",
 		"sass": "^1.49.7",
 		"tslib": "2.3.1",
-		"typescript": "4.4.4",
+		"typescript": "^5.4.5",
 		"yargs": "^17.3.1"
 	},
 	"dependencies": {
+		"@huggingface/transformers": "^4.3.1",
 		"fuzzysort": "^1.1.4",
 		"minimatch": "^10.0.1",
 		"minisearch": "^7.1.2"

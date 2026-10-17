@@ -8,7 +8,7 @@ export enum LogLevel {
 interface LogMessage {
     level: LogLevel;
     message: string;
-    data?: any;
+    data?: any[];
     timestamp: Date;
 }
 
@@ -51,23 +51,23 @@ class Logger {
         this.logLevel = level;
     }
 
-    public error(message: string, data?: any): void {
+    public error(message: string, ...data: any[]): void {
         this.log(LogLevel.ERROR, message, data);
     }
 
-    public warn(message: string, data?: any): void {
+    public warn(message: string, ...data: any[]): void {
         this.log(LogLevel.WARN, message, data);
     }
 
-    public info(message: string, data?: any): void {
+    public info(message: string, ...data: any[]): void {
         this.log(LogLevel.INFO, message, data);
     }
 
-    public debug(message: string, data?: any): void {
+    public debug(message: string, ...data: any[]): void {
         this.log(LogLevel.DEBUG, message, data);
     }
 
-    private log(level: LogLevel, message: string, data?: any): void {
+    private log(level: LogLevel, message: string, data: any[] = []): void {
         // For info/debug levels, check if debug mode is explicitly enabled
         if (level > LogLevel.WARN && !this.isDebugEnabled()) {
             return;
@@ -81,7 +81,7 @@ class Logger {
         const logMessage: LogMessage = {
             level,
             message,
-            data,
+            data: data.length > 0 ? data : undefined,
             timestamp: new Date(),
         };
 
@@ -94,29 +94,29 @@ class Logger {
 
         switch (logMessage.level) {
             case LogLevel.ERROR:
-                if (logMessage.data) {
-                    console.error(fullMessage, logMessage.data);
+                if (logMessage.data?.length) {
+                    console.error(fullMessage, ...logMessage.data);
                 } else {
                     console.error(fullMessage);
                 }
                 break;
             case LogLevel.WARN:
-                if (logMessage.data) {
-                    console.warn(fullMessage, logMessage.data);
+                if (logMessage.data?.length) {
+                    console.warn(fullMessage, ...logMessage.data);
                 } else {
                     console.warn(fullMessage);
                 }
                 break;
             case LogLevel.INFO:
-                if (logMessage.data) {
-                    console.log(fullMessage, logMessage.data);
+                if (logMessage.data?.length) {
+                    console.log(fullMessage, ...logMessage.data);
                 } else {
                     console.log(fullMessage);
                 }
                 break;
             case LogLevel.DEBUG:
-                if (logMessage.data) {
-                    console.log(fullMessage, logMessage.data);
+                if (logMessage.data?.length) {
+                    console.log(fullMessage, ...logMessage.data);
                 } else {
                     console.log(fullMessage);
                 }
@@ -132,4 +132,3 @@ export const logger = Logger.getInstance();
 export const {
     error, warn, info, debug,
 } = logger;
-

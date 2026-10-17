@@ -11,17 +11,72 @@
  */
 
 import { TFile, Vault, MetadataCache } from 'obsidian';
-import { FusedResult, HybridSearchResult, HybridSearchSettings, HybridMatchDetails } from './types';
+import {
+    FusedResult,
+    HybridSearchResult,
+    HybridSearchSettings,
+    HybridMatchDetails,
+} from './types';
+import {
+    HybridRelevanceScorer,
+    HybridRetrievalContext,
+    HybridReRankSignals,
+    HybridFinalScore,
+} from './relevance-scorer';
 import { FileUsageTracker } from '../usage-tracker';
 import { LinkGraphService } from '../link-graph-service';
 import { TermFrequencyIndex } from '../term-frequency-index';
 import { SegmentedQuery } from './query-segmenter';
 import { logger } from '../../utils/logger';
 
+export interface HybridReRankSession {
+    contentCache: Map<string, string>;
+    excerptCache: Map<string, string>;
+    scoredContentCache: Map<string, string>;
+}
+
+/** Shortest query term that counts for lexical signals (keeps "AI", "UX"). */
+const MIN_QUERY_TERM_LENGTH = 2;
+
+/**
+ * Split a lowercased query into unique lexical terms.
+ * Duplicates are removed so "data data science" behaves like "data science".
+ */
+export function extractQueryTerms(queryLower: string): string[] {
+    const terms = queryLower
+        .split(/\s+/)
+        .filter((term) => term.length >= MIN_QUERY_TERM_LENGTH);
+    return [...new Set(terms)];
+}
+
+/**
+ * Count non-overlapping literal occurrences of term in text, stopping at maxCount.
+ */
+export function countOccurrences(text: string, term: string, maxCount = Infinity): number {
+    if (!term) {
+        return 0;
+    }
+
+    let count = 0;
+    let idx = text.indexOf(term);
+    while (idx !== -1 && count < maxCount) {
+        count++;
+        idx = text.indexOf(term, idx + term.length);
+    }
+    return count;
+}
+
 /**
  * Re-ranker that refines hybrid search results using multiple signals
  */
 export class HybridReRanker {
+    private static readonly MAX_SCORING_CONTENT_CHARS = 12000;
+
+    private static readonly PREFIX_SCORING_CONTENT_CHARS = 4000;
+
+    /** Upper bound on how much of a large note is scanned to locate the query focus. */
+    private static readonly FOCAL_SEARCH_MAX_CHARS = 200000;
+
     private vault: Vault;
 
     private metadataCache: MetadataCache;
@@ -34,8 +89,7 @@ export class HybridReRanker {
 
     private settings: HybridSearchSettings;
 
-    // Per-search content cache to avoid redundant file reads
-    private contentCache: Map<string, string> = new Map();
+    private relevanceScorer: HybridRelevanceScorer;
 
     constructor(
         vault: Vault,
@@ -49,6 +103,7 @@ export class HybridReRanker {
         this.usageTracker = usageTracker;
         this.settings = settings;
         this.linkGraphService = linkGraphService ?? null;
+        this.relevanceScorer = new HybridRelevanceScorer(settings);
     }
 
     /**
@@ -58,11 +113,16 @@ export class HybridReRanker {
         this.linkGraphService = service;
     }
 
+    clearLinkGraphService(): void {
+        this.linkGraphService = null;
+    }
+
     /**
      * Update settings (called when settings change)
      */
     updateSettings(settings: HybridSearchSettings): void {
         this.settings = settings;
+        this.relevanceScorer.updateSettings(settings);
     }
 
     /**
@@ -73,12 +133,24 @@ export class HybridReRanker {
     }
 
     /**
+     * Create a per-search cache session so streaming phases can reuse reads and excerpts.
+     */
+    createSearchSession(): HybridReRankSession {
+        return {
+            contentCache: new Map(),
+            excerptCache: new Map(),
+            scoredContentCache: new Map(),
+        };
+    }
+
+    /**
      * Re-rank the top results using additional signals
      */
     async reRank(
         fusedResults: FusedResult[],
         query: string,
         segmentedQuery?: SegmentedQuery,
+        session: HybridReRankSession = this.createSearchSession(),
     ): Promise<HybridSearchResult[]> {
         const startTime = Date.now();
         const { reRankPoolSize, enableReRanking } = this.settings;
@@ -86,32 +158,41 @@ export class HybridReRanker {
         // If re-ranking is disabled, just convert to HybridSearchResult
         if (!enableReRanking) {
             logger.debug('Hybrid re-ranker: Re-ranking disabled, using fusion scores only');
-            return this.convertToHybridResults(fusedResults, query, false);
+            return this.convertToHybridResults(fusedResults, query, session);
         }
+
+        const retrievalContext = this.relevanceScorer.createRetrievalContext(fusedResults);
 
         // Take top N for re-ranking
         const poolToReRank = fusedResults.slice(0, reRankPoolSize);
         const remainder = fusedResults.slice(reRankPoolSize);
 
-        // Clear content cache for this search operation
-        this.contentCache.clear();
-
         logger.debug(`Hybrid re-ranker: Re-ranking top ${poolToReRank.length} results`);
 
         // Compute re-ranking scores for the pool
         const reRankedPool = await Promise.all(
-            poolToReRank.map((result) => this.computeReRankScore(result, query, segmentedQuery)),
+            poolToReRank.map((result) => this.computeReRankScore(
+                result,
+                query,
+                retrievalContext,
+                segmentedQuery,
+                session,
+            )),
         );
 
-        // Sort by final score
-        reRankedPool.sort((a, b) => b.finalScore - a.finalScore);
-
-        // Convert remainder without re-ranking
+        // Score the remainder with the same formula, using only signals that need no file reads
         const convertedRemainder = await Promise.all(
-            remainder.map((result) => this.convertSingleResult(result, query, 0)),
+            remainder.map((result) => this.convertSingleResult(
+                result,
+                query,
+                this.relevanceScorer.score(result, this.computeCheapSignals(result.file, query), retrievalContext),
+                session,
+            )),
         );
 
-        const allResults = [...reRankedPool, ...convertedRemainder];
+        // Sort the full list once so the output is ordered by final score
+        const allResults = [...reRankedPool, ...convertedRemainder]
+            .sort((a, b) => b.finalScore - a.finalScore);
 
         const elapsed = Date.now() - startTime;
         logger.debug(`Hybrid re-ranker: Completed in ${elapsed}ms`);
@@ -120,22 +201,93 @@ export class HybridReRanker {
     }
 
     /**
+     * Convert fused results into UI results without reading file content.
+     *
+     * Used for the fast streaming phase. When re-ranking is enabled the same
+     * final-score formula as {@link reRank} is applied (with only the cheap,
+     * IO-free signals) so scores stay on one scale and results do not reshuffle
+     * just because the scale changed when the complete phase arrives.
+     */
+    async buildResults(
+        fusedResults: FusedResult[],
+        query: string,
+        session: HybridReRankSession = this.createSearchSession(),
+    ): Promise<HybridSearchResult[]> {
+        if (!this.settings.enableReRanking) {
+            return this.convertToHybridResults(fusedResults, query, session);
+        }
+
+        const retrievalContext = this.relevanceScorer.createRetrievalContext(fusedResults);
+        const results = await Promise.all(
+            fusedResults.map((result) => this.convertSingleResult(
+                result,
+                query,
+                this.relevanceScorer.score(result, this.computeCheapSignals(result.file, query), retrievalContext),
+                session,
+            )),
+        );
+        return results.sort((a, b) => b.finalScore - a.finalScore);
+    }
+
+    /**
+     * Build results for a filter-only query (frontmatter filters, no text).
+     * Input order is preserved.
+     */
+    async buildFilterOnlyResults(
+        files: TFile[],
+        session: HybridReRankSession = this.createSearchSession(),
+    ): Promise<HybridSearchResult[]> {
+        const relevanceScore = this.relevanceScorer.scoreFilterMatch();
+        return Promise.all(files.map(async (file) => {
+            const fusedResult: FusedResult = {
+                path: file.path,
+                file,
+                fusionScore: 0,
+                source: 'keyword',
+            };
+            const result = await this.convertSingleResult(fusedResult, '', relevanceScore, session);
+            return {
+                ...result,
+                matches: {
+                    ...result.matches,
+                    titleMatch: false,
+                    tagMatch: false,
+                    keywordMatches: [],
+                    matchReason: 'Matched by frontmatter filters',
+                },
+            };
+        }));
+    }
+
+    /**
+     * Signals that can be computed without reading file content.
+     * Content density is unknown (0); proximity is only known to be neutral for
+     * single-term queries, otherwise it is treated as unmeasured (0).
+     */
+    private computeCheapSignals(file: TFile, query: string): HybridReRankSignals {
+        const queryLower = query.toLowerCase();
+        return {
+            title: this.computeTitleScore(file, queryLower),
+            recency: this.computeRecencyScore(file),
+            usage: this.computeUsageScore(file.path),
+            content: 0,
+            pageRank: this.computePageRankScore(file.path),
+            proximity: extractQueryTerms(queryLower).length <= 1 ? 0.5 : 0,
+            bounce: this.computeBounceScore(file.path),
+            feedback: this.computeFeedbackScore(file.path, query),
+        };
+    }
+
+    /**
      * Compute re-ranking score for a single result
      */
     private async computeReRankScore(
         fusedResult: FusedResult,
         query: string,
+        retrievalContext: HybridRetrievalContext,
         segmentedQuery?: SegmentedQuery,
+        session: HybridReRankSession = this.createSearchSession(),
     ): Promise<HybridSearchResult> {
-        const {
-            reRankTitleWeight,
-            reRankRecencyWeight,
-            reRankUsageWeight,
-            reRankContentWeight,
-            reRankPageRankWeight,
-            reRankProximityWeight,
-        } = this.settings;
-
         const file = fusedResult.file;
         const queryLower = query.toLowerCase();
 
@@ -149,74 +301,36 @@ export class HybridReRanker {
         const usageScore = this.computeUsageScore(file.path);
 
         // 4. Content density score (how much of the query appears in content)
-        const contentScore = await this.computeContentDensityScore(file, queryLower);
+        const contentScore = await this.computeContentDensityScore(file, queryLower, fusedResult, session);
 
         // 5. PageRank score (link importance)
         const pageRankScore = this.computePageRankScore(file.path);
 
         // 6. Proximity score (how close query terms appear to each other)
-        const proximityScore = await this.computeProximityScore(file, queryLower, segmentedQuery);
+        const proximityScore = await this.computeProximityScore(file, queryLower, fusedResult, segmentedQuery, session);
 
         // 7. Bounce penalty (negative signal from pogo-sticking)
         const bounceScore = this.computeBounceScore(file.path);
 
-        // Combine re-ranking signals (each score is 0-1)
-        // PageRank weight defaults to 0 if not set
-        const pageRankWeight = reRankPageRankWeight ?? 0.1;
-        const proximityWeight = reRankProximityWeight ?? 0.15;
-        const adjustedWeights = this.normalizeWeights(
-            reRankTitleWeight,
-            reRankRecencyWeight,
-            reRankUsageWeight,
-            reRankContentWeight,
-            pageRankWeight,
-            proximityWeight,
-        );
+        // 8. Explicit user feedback from upvotes/downvotes
+        const feedbackScore = this.computeFeedbackScore(file.path, query);
 
-        const reRankBoost = (
-            adjustedWeights.title * titleScore
-            + adjustedWeights.recency * recencyScore
-            + adjustedWeights.usage * usageScore
-            + adjustedWeights.content * contentScore
-            + adjustedWeights.pageRank * pageRankScore
-            + adjustedWeights.proximity * proximityScore
-            - (0.1 * bounceScore) // Penalty for high bounce rate
-        );
-
-        // Final score: Scale fusion score to 0-1 range and combine with re-rank signals
-        // RRF fusion score is typically in 0-0.03 range, so multiply by ~30 to normalize
-        // Then blend 60% normalized fusion + 40% re-rank boost for final 0-1 score
-        const normalizedFusionScore = Math.min(1, fusedResult.fusionScore * 30);
-        const finalScore = Math.max(0, (0.6 * normalizedFusionScore) + (0.4 * reRankBoost));
-
-        logger.debug(`Re-ranker: ${file.path} - fusion: ${fusedResult.fusionScore.toFixed(4)} -> ${normalizedFusionScore.toFixed(3)}, boost: ${reRankBoost.toFixed(3)}, pageRank: ${pageRankScore.toFixed(3)}, proximity: ${proximityScore.toFixed(3)}, bounce: ${bounceScore.toFixed(3)}, final: ${finalScore.toFixed(3)}`);
-
-        return this.convertSingleResult(fusedResult, query, reRankBoost, finalScore);
-    }
-
-    /**
-     * Normalize weights to ensure they sum to approximately 1
-     */
-    private normalizeWeights(
-        title: number,
-        recency: number,
-        usage: number,
-        content: number,
-        pageRank: number,
-        proximity: number,
-    ): { title: number; recency: number; usage: number; content: number; pageRank: number; proximity: number } {
-        const sum = title + recency + usage + content + pageRank + proximity;
-        if (sum <= 0) {
-            return { title: 1 / 6, recency: 1 / 6, usage: 1 / 6, content: 1 / 6, pageRank: 1 / 6, proximity: 1 / 6 };
-        }
-        return {
-            title: title / sum,
-            recency: recency / sum,
-            usage: usage / sum,
-            content: content / sum,
-            pageRank: pageRank / sum,
-            proximity: proximity / sum,
+        const signals: HybridReRankSignals = {
+            title: titleScore,
+            recency: recencyScore,
+            usage: usageScore,
+            content: contentScore,
+            pageRank: pageRankScore,
+            proximity: proximityScore,
+            bounce: bounceScore,
+            feedback: feedbackScore,
         };
+
+        const relevanceScore = this.relevanceScorer.score(fusedResult, signals, retrievalContext);
+
+        logger.debug(`Re-ranker: ${file.path} - fusion: ${fusedResult.fusionScore.toFixed(4)} -> ${relevanceScore.breakdown.normalizedFusionScore.toFixed(3)}, raw: ${relevanceScore.breakdown.rawScore.toFixed(3)}, retrieval: ${relevanceScore.breakdown.retrievalScore.toFixed(3)}, boost: ${relevanceScore.reRankBoost.toFixed(3)}, pageRank: ${pageRankScore.toFixed(3)}, proximity: ${proximityScore.toFixed(3)}, bounce: ${bounceScore.toFixed(3)}, feedback: ${feedbackScore.toFixed(3)}, final: ${relevanceScore.finalScore.toFixed(3)}`);
+
+        return this.convertSingleResult(fusedResult, query, relevanceScore, session);
     }
 
     /**
@@ -238,6 +352,13 @@ export class HybridReRanker {
     }
 
     /**
+     * Compute explicit feedback score (-1 to 1) from upvotes/downvotes.
+     */
+    private computeFeedbackScore(path: string, query: string): number {
+        return this.usageTracker.getResultFeedbackScore(path, query);
+    }
+
+    /**
      * Compute proximity score (0-1) measuring how close query terms appear to each other.
      * Uses the minimum span window algorithm to find the smallest text region
      * containing all query terms, then scores inversely to span size.
@@ -248,11 +369,13 @@ export class HybridReRanker {
     private async computeProximityScore(
         file: TFile,
         queryLower: string,
+        fusedResult: FusedResult,
         segmentedQuery?: SegmentedQuery,
+        session: HybridReRankSession = this.createSearchSession(),
     ): Promise<number> {
         // Use segments if available, otherwise fall back to simple word split
         const segments = segmentedQuery?.segments || [];
-        const queryTerms = queryLower.split(/\s+/).filter((w) => w.length > 2);
+        const queryTerms = extractQueryTerms(queryLower);
 
         // Single term or no valid terms - no proximity to measure
         if (queryTerms.length <= 1) {
@@ -260,7 +383,7 @@ export class HybridReRanker {
         }
 
         try {
-            const content = await this.getFileContent(file);
+            const content = await this.getScoringContent(file, queryLower, fusedResult, session);
             const contentLower = content.toLowerCase();
 
             // Find all positions of each query term
@@ -338,7 +461,7 @@ export class HybridReRanker {
                 totalScore += 1.0;
             } else {
                 // Phrase not found exactly - compute proximity of segment words
-                const segmentWords = segment.text.split(/\s+/).filter((w) => w.length > 2);
+                const segmentWords = extractQueryTerms(segment.text);
                 if (segmentWords.length > 1) {
                     // Build positions map for just this segment's words
                     const segmentTermPositions = new Map<string, number[]>();
@@ -452,7 +575,7 @@ export class HybridReRanker {
         }
 
         // Check individual query words
-        const queryWords = queryLower.split(/\s+/).filter((w) => w.length > 2);
+        const queryWords = extractQueryTerms(queryLower);
         const matchedWords = queryWords.filter((word) => titleLower.includes(word));
         if (matchedWords.length > 0) {
             return 0.4 * (matchedWords.length / queryWords.length);
@@ -487,22 +610,121 @@ export class HybridReRanker {
      * Compute usage score from usage tracker (0-1)
      */
     private computeUsageScore(path: string): number {
-        const rawScore = this.usageTracker.getUsageScore(path);
-        // Normalize to 0-1 range (assuming max usage score of 100)
-        return Math.min(rawScore / 100, 1.0);
+        // FileUsageTracker.getUsageScore is already normalized to 0-1
+        const score = this.usageTracker.getUsageScore(path);
+        return Math.max(0, Math.min(score, 1.0));
     }
 
     /**
-     * Get file content with caching to avoid redundant reads within a single search
+     * Get file content with caching to avoid redundant reads within a search.
      */
-    private async getFileContent(file: TFile): Promise<string> {
-        const cached = this.contentCache.get(file.path);
+    private async getFileContent(file: TFile, session: HybridReRankSession): Promise<string> {
+        const cached = session.contentCache.get(file.path);
         if (cached !== undefined) {
             return cached;
         }
         const content = await this.vault.cachedRead(file);
-        this.contentCache.set(file.path, content);
+        session.contentCache.set(file.path, content);
         return content;
+    }
+
+    /**
+     * Re-ranking only needs a bounded content window. Keep the file prefix plus a query-relevant window.
+     */
+    private async getScoringContent(
+        file: TFile,
+        queryLower: string,
+        fusedResult: FusedResult,
+        session: HybridReRankSession,
+    ): Promise<string> {
+        const cacheKey = `${file.path}::${queryLower}`;
+        const cached = session.scoredContentCache.get(cacheKey);
+        if (cached !== undefined) {
+            return cached;
+        }
+
+        const content = await this.getFileContent(file, session);
+        const scoredContent = this.limitContentForScoring(content, queryLower, fusedResult);
+        session.scoredContentCache.set(cacheKey, scoredContent);
+        return scoredContent;
+    }
+
+    private limitContentForScoring(content: string, queryLower: string, fusedResult: FusedResult): string {
+        const maxChars = HybridReRanker.MAX_SCORING_CONTENT_CHARS;
+        if (content.length <= maxChars) {
+            return content;
+        }
+
+        const focalIndex = this.findFocalContentIndex(content, queryLower, fusedResult);
+        if (focalIndex < 0) {
+            return content.slice(0, maxChars);
+        }
+
+        const prefixChars = Math.min(HybridReRanker.PREFIX_SCORING_CONTENT_CHARS, maxChars);
+        const windows: Array<{ start: number; end: number }> = [
+            { start: 0, end: prefixChars },
+        ];
+
+        const secondaryChars = Math.max(maxChars - prefixChars, 0);
+        if (secondaryChars > 0) {
+            const halfWindow = Math.floor(secondaryChars / 2);
+            const start = Math.max(0, focalIndex - halfWindow);
+            const end = Math.min(content.length, start + secondaryChars);
+            windows.push({
+                start: Math.max(0, end - secondaryChars),
+                end,
+            });
+        }
+
+        const mergedWindows = windows
+            .sort((a, b) => a.start - b.start)
+            .reduce<Array<{ start: number; end: number }>>((acc, window) => {
+                const previous = acc[acc.length - 1];
+                if (!previous || window.start > previous.end) {
+                    acc.push({ ...window });
+                    return acc;
+                }
+
+                previous.end = Math.max(previous.end, window.end);
+                return acc;
+            }, []);
+
+        return mergedWindows
+            .map((window) => content.slice(window.start, window.end))
+            .join('\n...\n');
+    }
+
+    private findFocalContentIndex(content: string, queryLower: string, fusedResult: FusedResult): number {
+        // Only lowercase/scan a bounded prefix so very large notes stay cheap per query
+        const contentLower = content.length > HybridReRanker.FOCAL_SEARCH_MAX_CHARS
+            ? content.slice(0, HybridReRanker.FOCAL_SEARCH_MAX_CHARS).toLowerCase()
+            : content.toLowerCase();
+        const semanticChunk = fusedResult.semanticResult?.matchedChunkText?.toLowerCase().trim();
+
+        if (semanticChunk) {
+            const semanticPrefix = semanticChunk.slice(0, 250);
+            const semanticIndex = contentLower.indexOf(semanticPrefix);
+            if (semanticIndex !== -1) {
+                return semanticIndex;
+            }
+        }
+
+        const fullQueryIndex = contentLower.indexOf(queryLower);
+        if (fullQueryIndex !== -1) {
+            return fullQueryIndex;
+        }
+
+        const queryTerms = extractQueryTerms(queryLower)
+            .sort((a, b) => b.length - a.length);
+
+        for (const term of queryTerms) {
+            const termIndex = contentLower.indexOf(term);
+            if (termIndex !== -1) {
+                return termIndex;
+            }
+        }
+
+        return -1;
     }
 
     /**
@@ -510,12 +732,17 @@ export class HybridReRanker {
      * Measures how many query terms appear in the content, weighted by IDF.
      * Rare terms contribute more to the score than common terms.
      */
-    private async computeContentDensityScore(file: TFile, queryLower: string): Promise<number> {
+    private async computeContentDensityScore(
+        file: TFile,
+        queryLower: string,
+        fusedResult: FusedResult,
+        session: HybridReRankSession,
+    ): Promise<number> {
         try {
-            const content = await this.getFileContent(file);
+            const content = await this.getScoringContent(file, queryLower, fusedResult, session);
             const contentLower = content.toLowerCase();
 
-            const queryWords = queryLower.split(/\s+/).filter((w) => w.length > 2);
+            const queryWords = extractQueryTerms(queryLower);
             if (queryWords.length === 0) return 0;
 
             // Get IDF weights for query terms (or uniform weights if no index)
@@ -530,12 +757,12 @@ export class HybridReRanker {
                 const weight = termWeights.get(word) ?? (1 / queryWords.length);
                 totalWeight += weight;
 
-                const regex = new RegExp(word, 'gi');
-                const matches = contentLower.match(regex);
-                if (matches && matches.length > 0) {
+                // Literal match (query terms like "c++" or "s.i" are not patterns)
+                const occurrences = countOccurrences(contentLower, word, 5);
+                if (occurrences > 0) {
                     // Score based on occurrence count (capped) weighted by IDF
                     // More occurrences = better, but diminishing returns after 5
-                    const occurrenceScore = Math.min(matches.length / 5, 1);
+                    const occurrenceScore = Math.min(occurrences / 5, 1);
                     weightedScore += weight * occurrenceScore;
                 }
             }
@@ -628,15 +855,16 @@ export class HybridReRanker {
     private async convertToHybridResults(
         fusedResults: FusedResult[],
         query: string,
-        withReRank: boolean,
+        session: HybridReRankSession,
     ): Promise<HybridSearchResult[]> {
-        return Promise.all(
+        const retrievalContext = this.relevanceScorer.createRetrievalContext(fusedResults);
+        const results = await Promise.all(
             fusedResults.map((result) => {
-                // Normalize fusion score to 0-1 range even without re-ranking
-                const normalizedFusionScore = Math.min(1, result.fusionScore * 30);
-                return this.convertSingleResult(result, query, 0, normalizedFusionScore);
+                const relevanceScore = this.relevanceScorer.scoreWithoutReRanking(result, retrievalContext);
+                return this.convertSingleResult(result, query, relevanceScore, session);
             }),
         );
+        return results.sort((a, b) => b.finalScore - a.finalScore);
     }
 
     /**
@@ -645,8 +873,8 @@ export class HybridReRanker {
     private async convertSingleResult(
         fusedResult: FusedResult,
         query: string,
-        reRankBoost: number,
-        finalScore?: number,
+        relevanceScore: HybridFinalScore,
+        session: HybridReRankSession = this.createSearchSession(),
     ): Promise<HybridSearchResult> {
         const file = fusedResult.file;
 
@@ -657,13 +885,13 @@ export class HybridReRanker {
 
         // If no excerpt, generate one
         if (!excerpt) {
-            excerpt = await this.generateExcerpt(file, query);
+            excerpt = await this.generateExcerpt(file, query, 150, session);
         }
 
         const matches = this.buildMatchDetails(fusedResult, query);
 
-        // Always normalize the final score to 0-1 range
-        const normalizedFinalScore = finalScore ?? Math.min(1, fusedResult.fusionScore * 30);
+        // Scores are already normalized by HybridRelevanceScorer.
+        const normalizedFinalScore = relevanceScore.finalScore;
 
         return {
             file,
@@ -674,10 +902,12 @@ export class HybridReRanker {
             keywordScore: fusedResult.keywordResult?.normalizedScore ?? 0,
             semanticScore: fusedResult.semanticResult?.normalizedScore ?? 0,
             fusionScore: fusedResult.fusionScore,
-            reRankBoost,
+            reRankBoost: relevanceScore.reRankBoost,
+            scoreBreakdown: relevanceScore.breakdown,
             source: fusedResult.source,
             keywordRank: fusedResult.keywordResult?.rank,
             semanticRank: fusedResult.semanticResult?.rank,
+            semanticMatchedChunkIndex: fusedResult.semanticResult?.matchedChunkIndex,
             matches,
             metadata: fusedResult.keywordResult?.metadata,
             lastModified: file.stat.mtime,
@@ -687,26 +917,42 @@ export class HybridReRanker {
     /**
      * Generate an excerpt for a file
      */
-    private async generateExcerpt(file: TFile, query: string, maxLength = 150): Promise<string> {
+    private async generateExcerpt(
+        file: TFile,
+        query: string,
+        maxLength = 150,
+        session: HybridReRankSession,
+    ): Promise<string> {
         try {
-            const content = await this.vault.cachedRead(file);
-            const queryWords = query.toLowerCase().split(/\s+/).filter((w) => w.length > 2);
+            const cached = session.excerptCache.get(file.path);
+            if (cached !== undefined) {
+                return cached;
+            }
+
+            const content = await this.getFileContent(file, session);
+            const queryWords = extractQueryTerms(query.toLowerCase());
 
             // Find the first sentence containing a query word
-            const sentences = content.split(/[.!?]+/).map((s) => s.trim()).filter((s) => s.length > 0);
+            const sentences = queryWords.length === 0
+                ? []
+                : content.split(/[.!?]+/).map((s) => s.trim()).filter((s) => s.length > 0);
 
             for (const sentence of sentences) {
                 const sentenceLower = sentence.toLowerCase();
                 if (queryWords.some((word) => sentenceLower.includes(word))) {
-                    return sentence.length > maxLength
+                    const excerpt = sentence.length > maxLength
                         ? `${sentence.substring(0, maxLength)}...`
                         : sentence;
+                    session.excerptCache.set(file.path, excerpt);
+                    return excerpt;
                 }
             }
 
             // Fallback to beginning of content
             const firstContent = content.substring(0, maxLength).trim();
-            return firstContent ? `${firstContent}...` : 'No preview available';
+            const excerpt = firstContent ? `${firstContent}...` : 'No preview available';
+            session.excerptCache.set(file.path, excerpt);
+            return excerpt;
         } catch {
             return 'Could not load preview';
         }

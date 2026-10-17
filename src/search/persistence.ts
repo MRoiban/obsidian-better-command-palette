@@ -1,18 +1,51 @@
+import { App } from 'obsidian';
 import { ContentStore } from './interfaces';
 import { logger } from '../utils/logger';
+import { getVaultScopedName } from '../utils/vault-storage';
+
+/** Base IndexedDB name; scoped per vault via {@link IndexPersistence.getDatabaseName}. */
+export const INDEX_DB_BASE_NAME = 'better-command-palette-index';
+
+/**
+ * Version of the persisted search index format. Bump whenever tokenization,
+ * indexed fields, content limits or the serialized shape change so stale
+ * caches are discarded instead of silently reused.
+ *
+ * 2: vault-scoped DB, larger indexed content cap, tokenizer changes.
+ */
+export const SEARCH_INDEX_SCHEMA_VERSION = 2;
+
+export type LoadedSearchIndex =
+    | { status: 'missing' }
+    | { status: 'incompatible'; reason: string }
+    | { status: 'ok'; data: any; savedAt: number };
 
 /**
  * IndexedDB-based persistence layer for content storage
  * Provides reliable, client-side storage for indexed content
  */
 export class IndexPersistence implements ContentStore {
-    private dbName = 'better-command-palette-index';
+    private dbName: string;
 
     private dbVersion = 1;
 
     private db: IDBDatabase | null = null;
 
     private isInitialized = false;
+
+    /**
+     * @param app When provided, the database name is scoped to the current vault.
+     */
+    constructor(app?: App) {
+        this.dbName = IndexPersistence.getDatabaseName(app);
+    }
+
+    /**
+     * Resolve the IndexedDB name, scoped to the vault when an App is available.
+     */
+    static getDatabaseName(app?: App): string {
+        return app ? getVaultScopedName(app, INDEX_DB_BASE_NAME) : INDEX_DB_BASE_NAME;
+    }
 
     /**
      * Initialize the IndexedDB database
@@ -341,9 +374,11 @@ export class IndexPersistence implements ContentStore {
     }
 
     /**
-     * Load the serialized search index data
+     * Load the serialized search index data.
+     * Caches written with a different schema version or compatibility key
+     * are reported as incompatible so callers can discard them.
      */
-    async loadSearchIndex(): Promise<any> {
+    async loadSearchIndex(expectedCompatibilityKey?: string): Promise<LoadedSearchIndex> {
         this.ensureInitialized();
 
         return new Promise((resolve, reject) => {
@@ -352,7 +387,27 @@ export class IndexPersistence implements ContentStore {
             const request = store.get('__search_index__');
 
             request.onsuccess = () => {
-                resolve(request.result?.data || null);
+                const record = request.result;
+                if (!record || !record.data) {
+                    resolve({ status: 'missing' });
+                    return;
+                }
+
+                if (record.schemaVersion !== SEARCH_INDEX_SCHEMA_VERSION) {
+                    resolve({
+                        status: 'incompatible',
+                        reason: `schema version ${String(record.schemaVersion ?? 'none')} != ${SEARCH_INDEX_SCHEMA_VERSION}`,
+                    });
+                    return;
+                }
+
+                if (expectedCompatibilityKey !== undefined
+                    && record.compatibilityKey !== expectedCompatibilityKey) {
+                    resolve({ status: 'incompatible', reason: 'index options changed' });
+                    return;
+                }
+
+                resolve({ status: 'ok', data: record.data, savedAt: Number(record.timestamp) || 0 });
             };
 
             request.onerror = () => {
@@ -364,7 +419,7 @@ export class IndexPersistence implements ContentStore {
     /**
      * Save the serialized search index data
      */
-    async saveSearchIndex(indexData: any): Promise<void> {
+    async saveSearchIndex(indexData: any, compatibilityKey?: string): Promise<void> {
         this.ensureInitialized();
 
         return new Promise((resolve, reject) => {
@@ -374,6 +429,8 @@ export class IndexPersistence implements ContentStore {
             const data = {
                 id: '__search_index__',
                 data: indexData,
+                schemaVersion: SEARCH_INDEX_SCHEMA_VERSION,
+                compatibilityKey,
                 timestamp: Date.now(),
             };
 
@@ -401,9 +458,11 @@ export class IndexPersistence implements ContentStore {
     }
 
     /**
-     * Delete the entire database
+     * Delete the entire database. Pass the App to target the current vault's
+     * database, or an explicit name (defaults to the legacy un-scoped name).
      */
-    static async deleteDatabase(dbName = 'better-command-palette-index'): Promise<void> {
+    static async deleteDatabase(target: App | string = INDEX_DB_BASE_NAME): Promise<void> {
+        const dbName = typeof target === 'string' ? target : IndexPersistence.getDatabaseName(target);
         return new Promise((resolve, reject) => {
             const deleteRequest = indexedDB.deleteDatabase(dbName);
 

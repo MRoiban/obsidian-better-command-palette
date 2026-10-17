@@ -35,10 +35,10 @@ export class SearchTab implements BaseSettingsTab {
                     .setLimits(0, 1, 0.05)
                     .setValue(settings.enhancedSearch.scoreWeights[key] || 0)
                     .setDynamicTooltip()
-                    .onChange(async (value) => {
+                    .onChange((value) => {
                         // @ts-ignore
                         settings.enhancedSearch.scoreWeights[key] = value;
-                        await plugin.saveSettings();
+                        plugin.scheduleSettingsSave();
                     }));
         };
 
@@ -67,9 +67,9 @@ export class SearchTab implements BaseSettingsTab {
                 .setLimits(0.5, 0.99, 0.01)
                 .setValue(settings.linkGraph.dampingFactor)
                 .setDynamicTooltip()
-                .onChange(async (value) => {
+                .onChange((value) => {
                     settings.linkGraph.dampingFactor = value;
-                    await plugin.saveSettings();
+                    plugin.scheduleSettingsSave();
                 }));
 
         new Setting(containerEl)
@@ -79,9 +79,9 @@ export class SearchTab implements BaseSettingsTab {
                 .setLimits(10, 100, 5)
                 .setValue(settings.linkGraph.maxIterations)
                 .setDynamicTooltip()
-                .onChange(async (value) => {
+                .onChange((value) => {
                     settings.linkGraph.maxIterations = value;
-                    await plugin.saveSettings();
+                    plugin.scheduleSettingsSave();
                 }));
 
         new Setting(containerEl)
@@ -91,9 +91,9 @@ export class SearchTab implements BaseSettingsTab {
                 .setLimits(0, 1, 0.05)
                 .setValue(settings.linkGraph.weight)
                 .setDynamicTooltip()
-                .onChange(async (value) => {
+                .onChange((value) => {
                     settings.linkGraph.weight = value;
-                    await plugin.saveSettings();
+                    plugin.scheduleSettingsSave();
                 }));
 
         // Matching Settings
@@ -106,9 +106,9 @@ export class SearchTab implements BaseSettingsTab {
                 .setLimits(0, 2, 1)
                 .setValue(settings.enhancedSearch.typoTolerance)
                 .setDynamicTooltip()
-                .onChange(async (value) => {
+                .onChange((value) => {
                     settings.enhancedSearch.typoTolerance = value;
-                    await plugin.saveSettings();
+                    plugin.scheduleSettingsSave();
                 }));
 
         new Setting(containerEl)
@@ -160,9 +160,9 @@ export class SearchTab implements BaseSettingsTab {
                 .setLimits(1000, 50000, 1000)
                 .setValue(settings.enhancedSearch.maxIndexedFiles)
                 .setDynamicTooltip()
-                .onChange(async (value) => {
+                .onChange((value) => {
                     settings.enhancedSearch.maxIndexedFiles = value;
-                    await plugin.saveSettings();
+                    plugin.scheduleSettingsSave();
                 }));
 
         new Setting(containerEl)
@@ -172,9 +172,9 @@ export class SearchTab implements BaseSettingsTab {
                 .setLimits(100, 5000, 100)
                 .setValue(settings.enhancedSearch.indexingDebounceMs)
                 .setDynamicTooltip()
-                .onChange(async (value) => {
+                .onChange((value) => {
                     settings.enhancedSearch.indexingDebounceMs = value;
-                    await plugin.saveSettings();
+                    plugin.scheduleSettingsSave();
                 }));
 
         new Setting(containerEl)
@@ -184,9 +184,9 @@ export class SearchTab implements BaseSettingsTab {
                 .setLimits(128, 2048, 128)
                 .setValue(Math.round(settings.enhancedSearch.maxFileSize / 1024))
                 .setDynamicTooltip()
-                .onChange(async (value) => {
+                .onChange((value) => {
                     settings.enhancedSearch.maxFileSize = value * 1024;
-                    await plugin.saveSettings();
+                    plugin.scheduleSettingsSave();
                 }));
 
         new Setting(containerEl)
@@ -196,9 +196,9 @@ export class SearchTab implements BaseSettingsTab {
                 .setLimits(50, 500, 50)
                 .setValue(settings.enhancedSearch.contentPreviewLength)
                 .setDynamicTooltip()
-                .onChange(async (value) => {
+                .onChange((value) => {
                     settings.enhancedSearch.contentPreviewLength = value;
-                    await plugin.saveSettings();
+                    plugin.scheduleSettingsSave();
                 }));
 
         // Actions

@@ -20,7 +20,7 @@ export class IndexingCoordinator {
 
     private persistence: any;
 
-    private debounceCallback: (filePath: string, operation: string) => void;
+    private debounceCallback: (filePath: string, operation: 'create' | 'modify' | 'delete') => void | Promise<void>;
 
     private pendingUpdates = new Map<string, NodeJS.Timeout>();
 
@@ -38,7 +38,7 @@ export class IndexingCoordinator {
         contentStore: ContentStore,
         usageTracker: UsageTracker,
         persistence: any,
-        debounceCallback: (filePath: string, operation: string) => void,
+        debounceCallback: (filePath: string, operation: 'create' | 'modify' | 'delete') => void | Promise<void>,
         debounceMs = 500,
         options: { enableContentSearch?: boolean } = {},
     ) {
@@ -105,9 +105,6 @@ export class IndexingCoordinator {
                 await this.updateIndexMetadata(file.path, newMetadata);
 
                 this.pendingUpdates.delete(file.path);
-
-                // Trigger debounced callback to notify about the indexing
-                this.debounceCallback(file.path, 'modify');
             } catch (error) {
                 logger.error(`Failed to index file ${file.path}:`, error);
                 this.pendingUpdates.delete(file.path);
@@ -154,21 +151,12 @@ export class IndexingCoordinator {
         }
 
         try {
-            // First, get the new file to re-index it
+            await this.debounceCallback(oldPath, 'delete');
+
             const newFile = this.getFileByPath?.(newPath);
-            if (!newFile) {
-                logger.warn(`Enhanced search: Could not find renamed file at ${newPath}`);
-                // Just remove the old entry if we can't find the new one
-                await this.removeFile(oldPath);
-                return;
+            if (newFile) {
+                await this.debounceCallback(newPath, 'create');
             }
-
-            // Remove the old entry first
-            await this.contentStore.delete(oldPath);
-            await this.searchIndex.removeDocument(oldPath);
-
-            // Index the file with its new path
-            await this.indexFile(newFile);
 
             logger.debug(`Enhanced search: Successfully renamed file from ${oldPath} to ${newPath}`);
         } catch (error) {
@@ -296,18 +284,24 @@ export class IndexingCoordinator {
     async scheduleFileUpdate(filePath: string, operation: 'create' | 'modify' | 'delete'): Promise<void> {
         logger.debug(`Enhanced search: Scheduling ${operation} operation for ${filePath}`);
 
-        // For file modifications (edits), ensure we mark it for reindexing
-        if (operation === 'modify') {
-            // Get the actual TFile object to trigger proper reindexing
-            const file = this.getFileByPath?.(filePath);
-            if (file) {
-                await this.indexFile(file);
-                return;
-            }
+        if (this.pendingUpdates.has(filePath)) {
+            clearTimeout(this.pendingUpdates.get(filePath)!);
+            this.pendingUpdates.delete(filePath);
         }
 
-        // For other operations or if we can't get the file object, use the callback
-        this.debounceCallback(filePath, operation);
+        if (operation === 'delete') {
+            await this.debounceCallback(filePath, operation);
+            return;
+        }
+
+        this.pendingUpdates.set(filePath, setTimeout(async () => {
+            this.pendingUpdates.delete(filePath);
+            try {
+                await this.debounceCallback(filePath, operation);
+            } catch (error) {
+                logger.error(`Enhanced search: Failed to process scheduled ${operation} for ${filePath}:`, error);
+            }
+        }, this.debounceMs));
     }
 
     /**
@@ -421,8 +415,6 @@ export class IndexingCoordinator {
             // Update the last indexed time and content hash in persistence
             await this.updateIndexMetadata(file.path, metadata);
 
-            // Trigger debounced callback to notify about the indexing
-            this.debounceCallback(file.path, 'modify');
         } catch (error) {
             logger.error(`Failed to force reindex file ${file.path}:`, error);
             throw error;

@@ -27,7 +27,7 @@ export class ContentSearchScorer {
         // Exponential decay for recency (more recent = higher score)
         const recencyScore = this.calculateRecencyScore(context.lastOpened);
 
-        // Logarithmic scale for usage frequency
+        // Usage frequency (tracker already log-normalizes to 0-1)
         const frequencyScore = this.calculateFrequencyScore(context.usageScore);
 
         // PageRank/link importance score (already normalized 0-1)
@@ -79,18 +79,17 @@ export class ContentSearchScorer {
     }
 
     /**
-     * Calculate frequency score using logarithmic scaling
-     * Higher usage frequency gets higher scores with diminishing returns
+     * Frequency score from the usage tracker's normalized usage score.
+     * `UsageTracker.getUsageScore` already applies log scaling relative to the
+     * most-used file and returns 0-1, so it is consumed directly here rather
+     * than normalized a second time.
      */
-    private calculateFrequencyScore(usageCount: number): number {
-        if (usageCount <= 0 || !this.settings.enableUsageTracking) {
+    private calculateFrequencyScore(usageScore: number): number {
+        if (!Number.isFinite(usageScore) || usageScore <= 0 || !this.settings.enableUsageTracking) {
             return 0;
         }
 
-        // Logarithmic scaling with base adjustment for smoother curve
-        // log(1 + x) / log(1 + maxValue) maps [0, maxValue] to [0, 1]
-        const normalizedScore = Math.log(1 + usageCount) / Math.log(1 + this.settings.maxUsageScore);
-        return Math.min(1, normalizedScore);
+        return Math.min(1, usageScore);
     }
 
     /**

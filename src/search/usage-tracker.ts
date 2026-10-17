@@ -1,5 +1,7 @@
+import { App } from 'obsidian';
 import { UsageTracker } from './interfaces';
 import { logger } from '../utils/logger';
+import { readVaultScopedLocalStorage, writeVaultScopedLocalStorage } from '../utils/vault-storage';
 
 /**
  * Stored data format for file access tracking
@@ -23,12 +25,22 @@ interface BounceData {
 }
 
 /**
+ * Explicit user relevance feedback for a result.
+ */
+interface FeedbackData {
+    upvotes: number;
+    downvotes: number;
+    lastUpdated: number;
+}
+
+/**
  * Storage format for persistence
  */
 interface StorageData {
     version: string;
     fileAccess: Array<{ path: string } & FileAccessData>;
     bounceData?: Array<{ path: string } & BounceData>;
+    feedbackData?: Array<{ key: string } & FeedbackData>;
 }
 
 /**
@@ -51,7 +63,7 @@ export class FileUsageTracker implements UsageTracker {
     private readonly SAVE_DEBOUNCE_MS = 1500;
 
     /** Storage version for migrations */
-    private readonly STORAGE_VERSION = '2.0.0';
+    private readonly STORAGE_VERSION = '2.1.0';
 
     /** Alias for backwards compatibility */
     private readonly STORAGE_KEY = this.storageKey;
@@ -63,6 +75,12 @@ export class FileUsageTracker implements UsageTracker {
     private bounceData = new Map<string, BounceData>();
 
     /**
+     * Explicit result feedback.
+     * Query-specific keys carry most of the signal; global path keys act as a weak prior.
+     */
+    private feedbackData = new Map<string, FeedbackData>();
+
+    /**
      * Tracks the last file opened from a search result.
      * Used to detect when user quickly returns to search (pogo-sticking).
      */
@@ -71,7 +89,19 @@ export class FileUsageTracker implements UsageTracker {
     /** Threshold in ms for detecting a bounce (quick return to search) */
     private readonly BOUNCE_THRESHOLD_MS = 5000;
 
-    constructor() {
+    private readonly FEEDBACK_KEY_SEPARATOR = '\u0000';
+
+    private readonly GLOBAL_FEEDBACK_QUERY = '*';
+
+    private readonly FEEDBACK_CONFIDENCE_OFFSET = 4;
+
+    private readonly FEEDBACK_DECAY_HALF_LIFE_DAYS = 90;
+
+    /** Used to scope localStorage to the current vault; legacy global key when absent. */
+    private readonly app: App | null;
+
+    constructor(app?: App) {
+        this.app = app ?? null;
         this.loadFromStorage();
     }
 
@@ -104,8 +134,16 @@ export class FileUsageTracker implements UsageTracker {
      * Record when a file is opened from a search result.
      * This enables pogo-sticking detection when the user returns to search quickly.
      */
-    recordSearchResultOpen(path: string, query: string): void {
-        this.recordFileOpen(path);
+    recordSearchResultOpen(
+        path: string,
+        query: string,
+        options: { recordFileOpen?: boolean } = {},
+    ): void {
+        const { recordFileOpen = true } = options;
+
+        if (recordFileOpen) {
+            this.recordFileOpen(path);
+        }
 
         this.lastSearchResult = {
             path,
@@ -121,6 +159,7 @@ export class FileUsageTracker implements UsageTracker {
         };
         bounce.openCount++;
         this.bounceData.set(path, bounce);
+        this.queueSave();
     }
 
     /**
@@ -176,6 +215,44 @@ export class FileUsageTracker implements UsageTracker {
         const decayFactor = Math.exp(-daysSinceLastBounce / 14); // 14-day half-life
 
         return bounceRate * decayFactor;
+    }
+
+    /**
+     * Record explicit user feedback for a search result.
+     */
+    recordResultFeedback(path: string, query: string, vote: 1 | -1): void {
+        if (!path || typeof path !== 'string') {
+            return;
+        }
+
+        const normalizedVote: 1 | -1 = vote >= 0 ? 1 : -1;
+        const queryKey = this.createFeedbackKey(path, query);
+        this.applyFeedbackVote(queryKey, normalizedVote);
+
+        const globalKey = this.createFeedbackKey(path);
+        this.applyFeedbackVote(globalKey, normalizedVote);
+
+        logger.debug(`Recorded ${normalizedVote > 0 ? 'positive' : 'negative'} feedback for ${path}`);
+        this.queueSave();
+    }
+
+    /**
+     * Get explicit feedback score for a file in the context of a query (-1 to 1).
+     */
+    getResultFeedbackScore(path: string, query?: string): number {
+        if (!path || typeof path !== 'string') {
+            return 0;
+        }
+
+        const normalizedQuery = this.normalizeFeedbackQuery(query);
+        const globalScore = this.getFeedbackScoreForKey(this.createFeedbackKey(path));
+
+        if (normalizedQuery === this.GLOBAL_FEEDBACK_QUERY) {
+            return globalScore * 0.5;
+        }
+
+        const queryScore = this.getFeedbackScoreForKey(this.createFeedbackKey(path, normalizedQuery));
+        return Math.max(-1, Math.min(1, (0.8 * queryScore) + (0.2 * globalScore)));
     }
 
     /**
@@ -327,7 +404,7 @@ export class FileUsageTracker implements UsageTracker {
         const cutoff = Date.now() - (daysSinceAccess * 24 * 60 * 60 * 1000);
 
         return Array.from(this.fileAccess.entries())
-            .filter(([path, data]) => data.lastOpened < cutoff)
+            .filter(([, data]) => data.lastOpened < cutoff)
             .map(([path, data]) => ({ path, lastOpened: data.lastOpened, count: data.count }))
             .sort((a, b) => a.lastOpened - b.lastOpened);
     }
@@ -339,6 +416,7 @@ export class FileUsageTracker implements UsageTracker {
         this.fileAccess.clear();
         this.searchHistory = [];
         this.bounceData.clear();
+        this.feedbackData.clear();
         this.lastSearchResult = null;
         this.flushPendingSave();
         this.saveToStorage();
@@ -350,7 +428,85 @@ export class FileUsageTracker implements UsageTracker {
     resetFileUsage(path: string): void {
         this.fileAccess.delete(path);
         this.bounceData.delete(path);
+        this.deleteFeedbackForPath(path);
         this.queueSave();
+    }
+
+    /**
+     * Move all usage data from oldPath to newPath after a file rename.
+     */
+    renameFile(oldPath: string, newPath: string): void {
+        if (!oldPath || !newPath || oldPath === newPath) {
+            return;
+        }
+
+        let changed = false;
+
+        const access = this.fileAccess.get(oldPath);
+        if (access) {
+            this.fileAccess.delete(oldPath);
+            this.fileAccess.set(newPath, access);
+            changed = true;
+        }
+
+        const bounce = this.bounceData.get(oldPath);
+        if (bounce) {
+            this.bounceData.delete(oldPath);
+            this.bounceData.set(newPath, bounce);
+            changed = true;
+        }
+
+        const oldSuffix = `${this.FEEDBACK_KEY_SEPARATOR}${oldPath}`;
+        for (const [key, feedback] of Array.from(this.feedbackData.entries())) {
+            if (key.endsWith(oldSuffix)) {
+                const prefix = key.slice(0, key.length - oldSuffix.length);
+                this.feedbackData.delete(key);
+                this.feedbackData.set(`${prefix}${this.FEEDBACK_KEY_SEPARATOR}${newPath}`, feedback);
+                changed = true;
+            }
+        }
+
+        for (const record of this.searchHistory) {
+            if (record.selectedPath === oldPath) {
+                record.selectedPath = newPath;
+            }
+        }
+
+        if (this.lastSearchResult?.path === oldPath) {
+            this.lastSearchResult.path = newPath;
+        }
+
+        if (changed) {
+            this.queueSave();
+        }
+    }
+
+    /**
+     * Drop all usage data for a deleted file.
+     */
+    deleteFile(path: string): void {
+        if (!path) {
+            return;
+        }
+
+        const changed = this.fileAccess.has(path) || this.bounceData.has(path);
+        const feedbackBefore = this.feedbackData.size;
+        this.fileAccess.delete(path);
+        this.bounceData.delete(path);
+        this.deleteFeedbackForPath(path);
+
+        if (this.lastSearchResult?.path === path) {
+            this.lastSearchResult = null;
+        }
+
+        if (changed || this.feedbackData.size !== feedbackBefore) {
+            this.queueSave();
+        }
+    }
+
+    shutdown(): void {
+        this.flushPendingSave();
+        this.saveToStorage();
     }
 
     /**
@@ -376,6 +532,64 @@ export class FileUsageTracker implements UsageTracker {
             max = Math.max(max, data.count);
         }
         return max || 1; // Avoid division by zero
+    }
+
+    private applyFeedbackVote(key: string, vote: 1 | -1): void {
+        const feedback = this.feedbackData.get(key) ?? {
+            upvotes: 0,
+            downvotes: 0,
+            lastUpdated: 0,
+        };
+
+        if (vote > 0) {
+            feedback.upvotes++;
+        } else {
+            feedback.downvotes++;
+        }
+
+        feedback.lastUpdated = Date.now();
+        this.feedbackData.set(key, feedback);
+    }
+
+    private getFeedbackScoreForKey(key: string): number {
+        const feedback = this.feedbackData.get(key);
+        if (!feedback) {
+            return 0;
+        }
+
+        const totalVotes = feedback.upvotes + feedback.downvotes;
+        if (totalVotes <= 0) {
+            return 0;
+        }
+
+        const polarity = (feedback.upvotes - feedback.downvotes) / totalVotes;
+        const confidence = totalVotes / (totalVotes + this.FEEDBACK_CONFIDENCE_OFFSET);
+        const ageDays = (Date.now() - feedback.lastUpdated) / (1000 * 60 * 60 * 24);
+        const decay = Math.exp(-ageDays / this.FEEDBACK_DECAY_HALF_LIFE_DAYS);
+
+        return Math.max(-1, Math.min(1, polarity * confidence * decay));
+    }
+
+    private createFeedbackKey(path: string, query?: string): string {
+        return `${this.normalizeFeedbackQuery(query)}${this.FEEDBACK_KEY_SEPARATOR}${path}`;
+    }
+
+    private normalizeFeedbackQuery(query?: string): string {
+        const normalized = (query || '')
+            .toLowerCase()
+            .trim()
+            .replace(/\s+/g, ' ');
+
+        return normalized || this.GLOBAL_FEEDBACK_QUERY;
+    }
+
+    private deleteFeedbackForPath(path: string): void {
+        const suffix = `${this.FEEDBACK_KEY_SEPARATOR}${path}`;
+        for (const key of this.feedbackData.keys()) {
+            if (key.endsWith(suffix)) {
+                this.feedbackData.delete(key);
+            }
+        }
     }
 
     /**
@@ -408,13 +622,31 @@ export class FileUsageTracker implements UsageTracker {
                 }
             }
 
+            const feedbackDataArray: Array<{ key: string } & FeedbackData> = [];
+            for (const [key, feedback] of this.feedbackData.entries()) {
+                if (typeof key === 'string') {
+                    feedbackDataArray.push({
+                        key,
+                        upvotes: Number(feedback.upvotes) || 0,
+                        downvotes: Number(feedback.downvotes) || 0,
+                        lastUpdated: Number(feedback.lastUpdated) || 0,
+                    });
+                }
+            }
+
             const data: StorageData = {
                 version: this.STORAGE_VERSION,
                 fileAccess: fileAccessArray,
                 bounceData: bounceDataArray,
+                feedbackData: feedbackDataArray,
             };
 
-            localStorage.setItem(this.STORAGE_KEY, JSON.stringify(data));
+            const serialized = JSON.stringify(data);
+            if (this.app) {
+                writeVaultScopedLocalStorage(this.app, this.STORAGE_KEY, serialized);
+            } else {
+                window.localStorage.setItem(this.STORAGE_KEY, serialized);
+            }
         } catch (error) {
             logger.error('Failed to save usage data to localStorage:', error);
         }
@@ -425,7 +657,9 @@ export class FileUsageTracker implements UsageTracker {
      */
     private loadFromStorage(): void {
         try {
-            const stored = localStorage.getItem(this.STORAGE_KEY);
+            const stored = this.app
+                ? readVaultScopedLocalStorage(this.app, this.STORAGE_KEY)
+                : window.localStorage.getItem(this.STORAGE_KEY);
             if (!stored) {
                 return;
             }
@@ -461,6 +695,16 @@ export class FileUsageTracker implements UsageTracker {
                     });
                 }
             }
+
+            if (data.feedbackData) {
+                for (const item of data.feedbackData) {
+                    this.feedbackData.set(item.key, {
+                        upvotes: item.upvotes,
+                        downvotes: item.downvotes,
+                        lastUpdated: item.lastUpdated,
+                    });
+                }
+            }
         } catch (error) {
             logger.error('Failed to load usage data from localStorage:', error);
         }
@@ -472,8 +716,9 @@ export class FileUsageTracker implements UsageTracker {
     exportData(): any {
         return {
             fileAccess: Array.from(this.fileAccess.entries()),
+            feedbackData: Array.from(this.feedbackData.entries()),
             searchHistory: this.searchHistory,
-            version: '1.0.0',
+            version: this.STORAGE_VERSION,
             exportDate: Date.now(),
         };
     }
@@ -485,6 +730,7 @@ export class FileUsageTracker implements UsageTracker {
         try {
             if (data.version && data.fileAccess && data.searchHistory) {
                 this.fileAccess = new Map(data.fileAccess);
+                this.feedbackData = new Map(data.feedbackData ?? []);
                 this.searchHistory = data.searchHistory;
                 this.flushPendingSave();
                 this.saveToStorage();
@@ -553,6 +799,10 @@ export class FileUsageTracker implements UsageTracker {
                         });
                     }
                 }
+            }
+
+            if (data.feedbackData && Array.isArray(data.feedbackData)) {
+                this.feedbackData = new Map(data.feedbackData);
             }
 
             this.flushPendingSave();

@@ -8,3 +8,4 @@ export { SemanticSearchModal } from './semantic-search-modal';
 export { RequestQueue } from './request-queue';
 export { SemanticIndexingCoordinator } from './semantic-indexing-coordinator';
 export type { SemanticSearchResult, SemanticSearchSettings } from './types';
+export type { EmbeddingProvider, ProviderStatus } from './providers/types';

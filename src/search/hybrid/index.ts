@@ -7,6 +7,14 @@
 export { HybridSearchService } from './hybrid-search-service';
 export type { HybridSearchOptions } from './hybrid-search-service';
 export { HybridReRanker } from './re-ranker';
+export type { HybridReRankSession } from './re-ranker';
+export { HybridRelevanceScorer } from './relevance-scorer';
+export type {
+    HybridFinalScore,
+    HybridRetrievalContext,
+    HybridRetrievalScore,
+    HybridReRankSignals,
+} from './relevance-scorer';
 export {
     fuseResults,
     normalizeKeywordResults,
@@ -17,6 +25,7 @@ export type {
     HybridSearchResult,
     HybridSearchSettings,
     HybridMatchDetails,
+    HybridScoreBreakdown,
     HybridResultSource,
     FusedResult,
     NormalizedKeywordResult,
@@ -28,6 +37,7 @@ export {
     evaluateAllFilters,
     evaluateFilter,
     getFrontmatter,
+    serializeFilters,
 } from './query-filter-parser';
 export type {
     QueryFilter,

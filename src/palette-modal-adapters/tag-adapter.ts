@@ -5,7 +5,7 @@ import {
 }
     from 'src/utils';
 import { ActionType, QUERY_TAG } from 'src/utils/constants';
-import { Match, UnsafeAppInterface } from '../types/types';
+import { Match, UnsafeAppInterface, WorkerMode } from '../types/types';
 
 export default class BetterCommandPaletteTagAdapter extends SuggestModalAdapter {
     titleText: string;
@@ -19,18 +19,22 @@ export default class BetterCommandPaletteTagAdapter extends SuggestModalAdapter 
 
     tagSearchPrefix: string;
 
+    getWorkerMode(): WorkerMode {
+        return 'tags';
+    }
+
     initialize(): void {
         super.initialize();
 
-        this.hiddenIds = this.plugin.settings.hiddenTags;
+        this.hiddenIds = [...this.plugin.settings.hiddenTags];
         this.hiddenIdsSettingsKey = 'hiddenTags';
 
         this.tagSearchPrefix = this.plugin.settings.tagSearchPrefix;
         this.titleText = 'Better Command Palette: Tags';
         this.emptyStateText = 'No matching tags.';
 
-        this.allItems = Object.entries(this.app.metadataCache.getTags())
-            .map(([tag, count]) => new PaletteMatch(tag, tag, [count]));
+        this.setItems(Object.entries(this.app.metadataCache.getTags())
+            .map(([tag, count]) => new PaletteMatch(tag, tag, [String(count)])));
     }
 
     mount(): void {
@@ -49,7 +53,9 @@ export default class BetterCommandPaletteTagAdapter extends SuggestModalAdapter 
     }
 
     cleanQuery(query: string): string {
-        return query.replace(this.tagSearchPrefix, '');
+        return query.startsWith(this.tagSearchPrefix)
+            ? query.slice(this.tagSearchPrefix.length)
+            : query;
     }
 
     renderSuggestion(match: Match, content: HTMLElement, aux: HTMLElement): void {
@@ -60,8 +66,9 @@ export default class BetterCommandPaletteTagAdapter extends SuggestModalAdapter 
 
         const count = parseInt(match.tags[0], 10);
 
+        // The palette already renders the hide toggle as .suggestion-flair in aux
         aux.createEl('span', {
-            cls: 'suggestion-flair',
+            cls: 'suggestion-note tag-usage-count',
             text: `Found in ${count} file${count === 1 ? '' : 's'}`,
         });
     }
@@ -72,7 +79,7 @@ export default class BetterCommandPaletteTagAdapter extends SuggestModalAdapter 
             return;
         }
 
-        this.getPrevItems().add(match);
+        this.recordRecentMatch(match);
         this.palette.open();
         this.palette.setQuery(`${this.plugin.settings.fileSearchPrefix}${QUERY_TAG}${match.text}`, 1);
     }

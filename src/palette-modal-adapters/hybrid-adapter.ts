@@ -46,9 +46,10 @@ export default class HybridSearchAdapter extends SuggestModalAdapter {
 
     private lastSearchResults: HybridMatch[] = [];
 
-    private searchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
-
+    /** Debounce applied by the palette before searching (semantic search is expensive) */
     private readonly SEARCH_DEBOUNCE_MS = 150;
+
+    private readonly MIN_QUERY_LENGTH = 2;
 
     constructor(
         app: any,
@@ -72,7 +73,6 @@ export default class HybridSearchAdapter extends SuggestModalAdapter {
         this.hiddenIds = this.plugin.settings.hiddenFiles;
         this.hiddenIdsSettingsKey = 'hiddenFiles';
 
-        this.allItems = [];
         this.lastSearchResults = [];
 
         // Load recent files as initial suggestions
@@ -84,8 +84,11 @@ export default class HybridSearchAdapter extends SuggestModalAdapter {
      */
     private loadRecentFiles(): void {
         const recentFiles = this.app.workspace.getLastOpenFiles().slice(0, 10);
+        const items: HybridMatch[] = [];
 
-        recentFiles.forEach((filePath: string) => {
+        // getLastOpenFiles is most-recent-first; add oldest first so the most recent
+        // file ends up on top of the sorted (last-added-first) list
+        [...recentFiles].reverse().forEach((filePath: string) => {
             if (!filePath || typeof filePath !== 'string') return;
 
             const file = this.app.vault.getAbstractFileByPath(filePath);
@@ -93,9 +96,12 @@ export default class HybridSearchAdapter extends SuggestModalAdapter {
                 const displayPath = this.processDisplayPath(filePath);
                 const match = new PaletteMatch(filePath, displayPath) as HybridMatch;
                 this.prevItems.add(match);
-                this.allItems.push(match);
+                items.push(match);
             }
         });
+
+        // setItems rebuilds the sorted cache that the palette reads
+        this.setItems(items);
     }
 
     mount(): void {
@@ -148,6 +154,26 @@ export default class HybridSearchAdapter extends SuggestModalAdapter {
         return true;
     }
 
+    canUseEnhancedSearch(query: string): boolean {
+        return this.cleanQuery(query).length >= this.MIN_QUERY_LENGTH
+            && !!this.hybridSearchService?.isReady();
+    }
+
+    getSearchDebounceMs(): number {
+        return this.SEARCH_DEBOUNCE_MS;
+    }
+
+    private toHybridMatch(result: HybridSearchResult): HybridMatch {
+        const displayPath = this.processDisplayPath(result.path);
+        const match = new PaletteMatch(
+            result.path,
+            displayPath,
+            result.metadata?.tags || [],
+        ) as HybridMatch;
+        match.hybridResult = result;
+        return match;
+    }
+
     /**
      * Get hybrid search results
      */
@@ -155,33 +181,20 @@ export default class HybridSearchAdapter extends SuggestModalAdapter {
         logger.debug('HybridSearchAdapter: getSearchResults called with:', query);
 
         const cleanQuery = this.cleanQuery(query);
-        if (cleanQuery.length < 2) {
-            return [];
-        }
-
-        if (!this.hybridSearchService?.isReady()) {
-            logger.debug('HybridSearchAdapter: Service not ready');
+        if (!this.hybridSearchService || !this.canUseEnhancedSearch(cleanQuery)) {
+            logger.debug('HybridSearchAdapter: Service not ready or query too short');
             return [];
         }
 
         try {
             const results = await this.hybridSearchService.search(cleanQuery, {
-                limit: this.plugin.settings.suggestionLimit,
+                limit: this.plugin.settings.hybridSearch.maxResults,
             });
 
             logger.debug('HybridSearchAdapter: Found', results.length, 'results');
 
             // Convert to HybridMatch format
-            this.lastSearchResults = results.map((result) => {
-                const displayPath = this.processDisplayPath(result.path);
-                const match = new PaletteMatch(
-                    result.path,
-                    displayPath,
-                    result.metadata?.tags || [],
-                ) as HybridMatch;
-                match.hybridResult = result;
-                return match;
-            });
+            this.lastSearchResults = results.map((result) => this.toHybridMatch(result));
 
             return this.lastSearchResults;
         } catch (error) {
@@ -192,7 +205,8 @@ export default class HybridSearchAdapter extends SuggestModalAdapter {
 
     /**
      * Stream search results for better UX
-     * Shows keyword results immediately, then blends in semantic results as they arrive
+     * Shows keyword results immediately, then blends in semantic results as they arrive.
+     * Debouncing is handled by the palette (see getSearchDebounceMs).
      */
     async streamSearchResults(
         query: string,
@@ -203,66 +217,37 @@ export default class HybridSearchAdapter extends SuggestModalAdapter {
         },
     ): Promise<void> {
         const cleanQuery = this.cleanQuery(query);
-        if (cleanQuery.length < 2 || !this.hybridSearchService?.isReady()) {
+        if (!this.hybridSearchService || !this.canUseEnhancedSearch(cleanQuery)) {
             options.onUpdate([], true);
             return;
         }
 
-        // Clear any pending search
-        if (this.searchDebounceTimer) {
-            clearTimeout(this.searchDebounceTimer);
-            this.searchDebounceTimer = null;
+        try {
+            await this.hybridSearchService.searchStream(cleanQuery, {
+                limit: options.limit,
+                signal: options.signal,
+                onUpdate: (results, phase) => {
+                    if (options.signal?.aborted) return;
+
+                    this.lastSearchResults = results.map((result) => this.toHybridMatch(result));
+
+                    // Emit results; done=true only when phase is 'complete'
+                    options.onUpdate(this.lastSearchResults, phase === 'complete');
+                },
+            });
+        } catch (error) {
+            if (options.signal?.aborted) {
+                return;
+            }
+            logger.error('HybridSearchAdapter: Stream search failed', error);
+            options.onUpdate([], true);
         }
-
-        // Return a promise that resolves after the debounced search completes
-        return new Promise((resolve) => {
-            this.searchDebounceTimer = setTimeout(async () => {
-                if (options.signal?.aborted) {
-                    options.onUpdate([], true);
-                    resolve();
-                    return;
-                }
-
-                try {
-                    await this.hybridSearchService!.searchStream(cleanQuery, {
-                        limit: options.limit,
-                        signal: options.signal,
-                        onUpdate: (results, phase) => {
-                            if (options.signal?.aborted) return;
-
-                            this.lastSearchResults = results.map((result) => {
-                                const displayPath = this.processDisplayPath(result.path);
-                                const match = new PaletteMatch(
-                                    result.path,
-                                    displayPath,
-                                    result.metadata?.tags || [],
-                                ) as HybridMatch;
-                                match.hybridResult = result;
-                                return match;
-                            });
-
-                            // Emit results; done=true only when phase is 'complete'
-                            options.onUpdate(this.lastSearchResults, phase === 'complete');
-                        },
-                    });
-                    resolve();
-                } catch (error) {
-                    if (options.signal?.aborted) {
-                        resolve();
-                        return;
-                    }
-                    logger.error('HybridSearchAdapter: Stream search failed', error);
-                    options.onUpdate([], true);
-                    resolve();
-                }
-            }, this.SEARCH_DEBOUNCE_MS);
-        });
     }
 
     /**
      * Render a hybrid search result with match indicators
      */
-    renderSuggestion(match: Match, content: HTMLElement, aux?: HTMLElement): void {
+    renderSuggestion(match: Match, content: HTMLElement, _aux?: HTMLElement): void {
         const hybridMatch = match as HybridMatch;
         const result = hybridMatch.hybridResult;
 
@@ -341,7 +326,29 @@ export default class HybridSearchAdapter extends SuggestModalAdapter {
             event.preventDefault();
             event.stopPropagation();
 
-            const menu = new Menu(this.app); // Using Obsidian Menu
+            const menu = new Menu();
+
+            if (result && this.hybridSearchService) {
+                menu.addItem((item) => {
+                    item
+                        .setTitle('Upvote result')
+                        .setIcon('thumbs-up')
+                        .onClick(() => {
+                            this.recordResultFeedback(match.id, displayName, 1);
+                        });
+                });
+
+                menu.addItem((item) => {
+                    item
+                        .setTitle('Downvote result')
+                        .setIcon('thumbs-down')
+                        .onClick(() => {
+                            this.recordResultFeedback(match.id, displayName, -1);
+                        });
+                });
+
+                menu.addSeparator();
+            }
 
             // Toggle Ignore/Hide
             const isHidden = this.hiddenIds.includes(match.id);
@@ -402,6 +409,25 @@ export default class HybridSearchAdapter extends SuggestModalAdapter {
         }
     }
 
+    private recordResultFeedback(path: string, displayName: string, vote: 1 | -1): void {
+        if (!this.hybridSearchService || !this.palette.inputEl) {
+            return;
+        }
+
+        const query = this.cleanQuery(this.palette.inputEl.value);
+        if (!query) {
+            new Notice('Search before voting on a result.');
+            return;
+        }
+
+        this.hybridSearchService.recordResultFeedback(query, path, vote);
+        // The query is unchanged, so force a fresh search to apply the new ranking
+        this.palette.refreshSuggestions();
+
+        const direction = vote > 0 ? 'more' : 'less';
+        new Notice(`Marked "${displayName}" as ${direction} relevant for this search.`);
+    }
+
     /**
      * Render excerpt with keyword highlights
      */
@@ -445,34 +471,11 @@ export default class HybridSearchAdapter extends SuggestModalAdapter {
     }
 
     /**
-            setIcon(indicator, 'brain-circuit'); // Or 'sparkles' if brain not avail. 'brain' is lucide.
-            // basic obsidian set might not have brain-circuit. 'star' or 'sparkle' is safer?
-            // standard obsidian icons: https://lucide.dev/ (Obsidian uses Lucide mostly now)
-            // Let's try 'sparkles' for semantic, 'zap' for both.
-
-            // Fallback logic if icons fail isn't easy here without runtime check, 
-            // but 'search' and 'link' and 'star' are safe. 
-            // Let's use 'search' (keyword), 'sparkles' (semantic), 'zap' (both).
-        }
-
-        // Re-do specific icon logic:
-        indicator.innerHTML = ''; // clear
-        if (result.source === 'both') {
-            setIcon(indicator, 'zap');
-        } else if (result.source === 'keyword') {
-            setIcon(indicator, 'search');
-        } else {
-            setIcon(indicator, 'sparkles');
-        }
-    }
-
-    /**
      * Handle file selection
      */
     async onChooseSuggestion(match: Match | null, event?: MouseEvent | KeyboardEvent): Promise<void> {
         if (!match) return;
 
-        const hybridMatch = match as HybridMatch;
         const filePath = match.id;
 
         // Record selection for improved future rankings
@@ -481,12 +484,6 @@ export default class HybridSearchAdapter extends SuggestModalAdapter {
             if (query) {
                 this.hybridSearchService.recordSelection(query, filePath);
             }
-        }
-
-        // Record for pogo-sticking detection
-        if (this.plugin.usageTracker && this.palette.inputEl) {
-            const query = this.cleanQuery(this.palette.inputEl.value);
-            this.plugin.usageTracker.recordSearchResultOpen(filePath, query);
         }
 
         const file = this.app.vault.getAbstractFileByPath(filePath);

@@ -5,6 +5,16 @@ import {
 import { TermFrequencyIndex } from './term-frequency-index';
 import { logger } from '../utils/logger';
 
+/**
+ * Maximum number of characters of note body indexed per document. Generous so
+ * words late in long notes stay searchable; files above `maxFileSize` are
+ * skipped entirely by the indexing service.
+ */
+export const MAX_INDEXED_CONTENT_CHARS = 50_000;
+
+/** Hard upper bound on results returned by a single index query. */
+const MAX_SEARCH_RESULTS = 200;
+
 export interface MiniSearchAdapterOptions {
     typoTolerance: number;
     foldAccents: boolean;
@@ -28,6 +38,8 @@ export class MiniSearchAdapter implements SearchIndex {
     private synonymMap: Map<string, string[]> = new Map();
 
     private documents = new Map<string, FileMetadata>();
+
+    private searchDocuments = new Map<string, any>();
 
     private documentCount = 0;
 
@@ -89,15 +101,16 @@ export class MiniSearchAdapter implements SearchIndex {
         try {
             const doc = this.createSearchDocument(id, content, metadata);
 
-            // Remove existing document if it exists
             if (this.index.has(id)) {
-                this.index.replace(doc);
+                this.removeIndexedDocument(id);
+                this.index.add(doc);
             } else {
                 this.index.add(doc);
                 this.documentCount++;
             }
 
             this.documents.set(id, metadata);
+            this.searchDocuments.set(id, doc);
             this.lastUpdated = Date.now();
 
             // Track term frequencies for IDF calculation
@@ -125,12 +138,12 @@ export class MiniSearchAdapter implements SearchIndex {
     async removeDocument(id: string): Promise<void> {
         try {
             if (this.index.has(id)) {
-                // MiniSearch.remove expects a document object with the id field
-                this.index.remove({ id } as any);
+                this.removeIndexedDocument(id);
                 this.documentCount--;
             }
 
             this.documents.delete(id);
+            this.searchDocuments.delete(id);
             this.lastUpdated = Date.now();
 
             // Update term frequency index
@@ -159,10 +172,10 @@ export class MiniSearchAdapter implements SearchIndex {
                 return [];
             }
 
-            const results = this.index.search(query, {
-                limit: Math.min(limit, 200),
-                ...this.searchOptions,
-            });
+            // MiniSearch has no `limit` option; results are already sorted by
+            // score, so take the top K before any per-result mapping work.
+            const maxResults = Math.max(0, Math.min(limit, MAX_SEARCH_RESULTS));
+            const results = this.index.search(query, this.searchOptions).slice(0, maxResults);
 
             return results.map((result) => ({
                 id: result.id,
@@ -195,6 +208,7 @@ export class MiniSearchAdapter implements SearchIndex {
     async clear(): Promise<void> {
         this.index = new MiniSearch(this.indexOptions);
         this.documents.clear();
+        this.searchDocuments.clear();
         this.documentCount = 0;
         this.lastUpdated = Date.now();
 
@@ -219,13 +233,38 @@ export class MiniSearchAdapter implements SearchIndex {
         return this.index.has(id);
     }
 
+    getDocumentIds(): string[] {
+        return Array.from(this.documents.keys());
+    }
+
+    private removeIndexedDocument(id: string): void {
+        const existingDocument = this.searchDocuments.get(id);
+
+        if (existingDocument) {
+            try {
+                this.index.remove(existingDocument);
+                return;
+            } catch (error) {
+                logger.warn(`MiniSearchAdapter: Falling back to discard for ${id}:`, error);
+            }
+        }
+
+        const discard = (this.index as any).discard;
+        if (typeof discard === 'function') {
+            discard.call(this.index, id);
+            return;
+        }
+
+        this.index.remove({ id } as any);
+    }
+
     /**
      * Create a search document from content and metadata
      */
     private createSearchDocument(id: string, content: string, metadata: FileMetadata): any {
         const doc = {
             id,
-            content: this.truncateContent(content, 2000), // Limit content size for performance
+            content: this.truncateContent(content, MAX_INDEXED_CONTENT_CHARS),
             title: metadata.title || this.extractTitle(content) || '',
             headings: this.extractHeadings(content).join(' '),
             tags: (metadata.tags || []).join(' '),
@@ -448,6 +487,7 @@ export class MiniSearchAdapter implements SearchIndex {
         return {
             index: this.index.toJSON(),
             documents: Array.from(this.documents.entries()),
+            searchDocuments: Array.from(this.searchDocuments.entries()),
             stats: this.getStats(),
             termFrequencyIndex: this.termFrequencyIndex?.serialize() ?? null,
         };
@@ -467,20 +507,20 @@ export class MiniSearchAdapter implements SearchIndex {
         try {
             this.index = MiniSearch.loadJSON(JSON.stringify(data.index), this.indexOptions);
             this.documents = new Map(data.documents);
+            this.searchDocuments = new Map(data.searchDocuments || []);
             this.documentCount = data.stats?.documentCount || this.documents.size;
             this.lastUpdated = data.stats?.lastUpdated || Date.now();
 
-            // Restore TermFrequencyIndex if available
-            if (data.termFrequencyIndex && this.termFrequencyIndex) {
-                const loaded = this.termFrequencyIndex.deserialize(data.termFrequencyIndex);
-                if (loaded) {
-                    const stats = this.termFrequencyIndex.getStats();
-                    logger.debug(`[TermFrequencyIndex] Loaded from cache: ${stats.totalDocuments} docs, ${stats.uniqueTerms} terms`);
-                } else {
-                    logger.debug('[TermFrequencyIndex] Failed to deserialize from cache (version mismatch or error)');
+            // Restore TermFrequencyIndex. It must stay in sync with the index,
+            // so a missing or unreadable copy makes the whole cache unusable.
+            if (this.termFrequencyIndex) {
+                const loaded = !!data.termFrequencyIndex
+                    && this.termFrequencyIndex.deserialize(data.termFrequencyIndex);
+                if (!loaded) {
+                    throw new Error('Cached TermFrequencyIndex is missing or incompatible');
                 }
-            } else {
-                logger.debug(`[TermFrequencyIndex] Skipped loading: hasData=${!!data.termFrequencyIndex}, hasIndex=${!!this.termFrequencyIndex}`);
+                const stats = this.termFrequencyIndex.getStats();
+                logger.debug(`[TermFrequencyIndex] Loaded from cache: ${stats.totalDocuments} docs, ${stats.uniqueTerms} terms`);
             }
         } catch (error) {
             logger.error('Failed to import index:', error);
