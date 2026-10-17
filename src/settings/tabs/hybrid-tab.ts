@@ -8,6 +8,12 @@ export class HybridTab implements BaseSettingsTab {
     icon = 'layers';
 
     display(containerEl: HTMLElement, app: App, plugin: BetterCommandPalettePlugin): void {
+        // Own a root element so re-renders replace the tab content instead of appending to it
+        this.render(containerEl.createDiv(), app, plugin);
+    }
+
+    private render(containerEl: HTMLElement, app: App, plugin: BetterCommandPalettePlugin): void {
+        containerEl.empty();
         const { settings } = plugin;
 
         new Setting(containerEl)
@@ -18,7 +24,7 @@ export class HybridTab implements BaseSettingsTab {
                 .onChange(async (value) => {
                     settings.hybridSearch.enabled = value;
                     await plugin.saveSettings();
-                    this.display(containerEl, app, plugin);
+                    this.render(containerEl, app, plugin);
                 }));
 
         if (!settings.hybridSearch.enabled) {

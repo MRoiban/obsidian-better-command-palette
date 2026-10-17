@@ -8,6 +8,12 @@ export class SearchTab implements BaseSettingsTab {
     icon = 'search';
 
     display(containerEl: HTMLElement, app: App, plugin: BetterCommandPalettePlugin): void {
+        // Own a root element so re-renders replace the tab content instead of appending to it
+        this.render(containerEl.createDiv(), app, plugin);
+    }
+
+    private render(containerEl: HTMLElement, app: App, plugin: BetterCommandPalettePlugin): void {
+        containerEl.empty();
         const { settings } = plugin;
 
         new Setting(containerEl)
@@ -18,7 +24,7 @@ export class SearchTab implements BaseSettingsTab {
                 .onChange(async (value) => {
                     settings.enhancedSearch.enableContentSearch = value;
                     await plugin.saveSettings();
-                    this.display(containerEl, app, plugin);
+                    this.render(containerEl, app, plugin);
                 }));
 
         if (!settings.enhancedSearch.enableContentSearch) {

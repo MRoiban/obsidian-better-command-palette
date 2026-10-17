@@ -9,6 +9,12 @@ export class MacrosTab implements BaseSettingsTab {
     icon = 'terminal-square';
 
     display(containerEl: HTMLElement, app: App, plugin: BetterCommandPalettePlugin): void {
+        // Own a root element so re-renders replace the tab content instead of appending to it
+        this.render(containerEl.createDiv(), app, plugin);
+    }
+
+    private render(containerEl: HTMLElement, app: App, plugin: BetterCommandPalettePlugin): void {
+        containerEl.empty();
         const { settings } = plugin;
 
         if (settings.macros.length === 0) {
@@ -25,7 +31,7 @@ export class MacrosTab implements BaseSettingsTab {
                 .setButtonText('+ Add Macro')
                 .setCta()
                 .onClick(async () => {
-                    await this.createNewMacro(plugin, () => this.display(containerEl, app, plugin));
+                    await this.createNewMacro(plugin, () => this.render(containerEl, app, plugin));
                 }));
 
         settings.macros.forEach((macro, index) => {
@@ -40,7 +46,7 @@ export class MacrosTab implements BaseSettingsTab {
                     .onClick(async () => {
                         settings.macros.splice(index, 1);
                         await plugin.saveSettings();
-                        this.display(containerEl, app, plugin);
+                        this.render(containerEl, app, plugin);
                     }));
 
             // Details
@@ -89,7 +95,7 @@ export class MacrosTab implements BaseSettingsTab {
                     removeBtn.addEventListener('click', async () => {
                         settings.macros[index].commandIds.splice(commandIndex, 1);
                         await plugin.saveSettings();
-                        this.display(containerEl, app, plugin);
+                        this.render(containerEl, app, plugin);
                     });
                 });
             }
@@ -103,7 +109,7 @@ export class MacrosTab implements BaseSettingsTab {
                         const modal = new HelperModal(app, async (command: any) => {
                             settings.macros[index].commandIds.push(command.id);
                             await plugin.saveSettings();
-                            this.display(containerEl, app, plugin);
+                            this.render(containerEl, app, plugin);
                         });
                         modal.open();
                     }));
