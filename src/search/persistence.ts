@@ -2,6 +2,7 @@ import { App } from 'obsidian';
 import { ContentStore } from './interfaces';
 import { logger } from '../utils/logger';
 import { getVaultScopedName } from '../utils/vault-storage';
+import { DatabaseDeleteOutcome, deleteIndexedDatabase } from '../utils/indexed-db';
 
 /** Base IndexedDB name; scoped per vault via {@link IndexPersistence.getDatabaseName}. */
 export const INDEX_DB_BASE_NAME = 'better-command-palette-index';
@@ -460,24 +461,16 @@ export class IndexPersistence implements ContentStore {
     /**
      * Delete the entire database. Pass the App to target the current vault's
      * database, or an explicit name (defaults to the legacy un-scoped name).
+     * Resolves 'blocked' when another connection keeps the database open (the
+     * deletion then completes once that connection closes).
      */
-    static async deleteDatabase(target: App | string = INDEX_DB_BASE_NAME): Promise<void> {
+    static async deleteDatabase(target: App | string = INDEX_DB_BASE_NAME): Promise<DatabaseDeleteOutcome> {
         const dbName = typeof target === 'string' ? target : IndexPersistence.getDatabaseName(target);
-        return new Promise((resolve, reject) => {
-            const deleteRequest = indexedDB.deleteDatabase(dbName);
-
-            deleteRequest.onsuccess = () => {
-                resolve();
-            };
-
-            deleteRequest.onerror = () => {
-                reject(new Error(`Failed to delete database: ${deleteRequest.error?.message}`));
-            };
-
-            deleteRequest.onblocked = () => {
-                logger.warn('Database deletion blocked. Close all tabs using this database.');
-            };
-        });
+        const outcome = await deleteIndexedDatabase(dbName);
+        if (outcome === 'blocked') {
+            logger.warn(`Database deletion blocked for "${dbName}". Close other windows or vaults using it.`);
+        }
+        return outcome;
     }
 
     private async handleDatabaseBlocked(): Promise<void> {

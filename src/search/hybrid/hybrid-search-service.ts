@@ -25,10 +25,14 @@ import {
 } from './query-filter-parser';
 import { applyClusteringIfEnabled } from './result-clusterer';
 import {
+    FusedResult,
     HybridSearchResult,
     HybridSearchSettings,
     DEFAULT_HYBRID_SEARCH_SETTINGS,
 } from './types';
+import type { RerankService, RerankStatus } from '../semantic/rerank/rerank-service';
+import { buildRerankPassage } from '../semantic/rerank/rerank-passage';
+import { fuseRerankOrder, sigmoid } from '../semantic/rerank/rerank-blend';
 import { logger } from '../../utils/logger';
 
 export interface HybridSearchOptions {
@@ -59,6 +63,9 @@ export class HybridSearchService {
     private linkGraphService: LinkGraphService | null = null;
 
     private reRanker: HybridReRanker;
+
+    /** Optional cross-encoder second pass over the final top-K; owned by the plugin. */
+    private crossEncoder: RerankService | null = null;
 
     private querySegmenter: QuerySegmenter;
 
@@ -186,6 +193,15 @@ export class HybridSearchService {
     }
 
     /**
+     * Set or clear the cross-encoder reranker applied to the final ordering
+     */
+    setReranker(reranker: RerankService | null): void {
+        this.crossEncoder = reranker;
+        this.clearCache();
+        logger.debug(`HybridSearchService: Cross-encoder reranker ${reranker ? 'enabled' : 'disabled'}`);
+    }
+
+    /**
      * Perform hybrid search
      */
     async search(
@@ -285,10 +301,13 @@ export class HybridSearchService {
             logger.debug(`HybridSearchService: Filtering with threshold ${threshold} and ${filters.length} frontmatter filters`);
             const filteredResults = this.filterAndLimitResults(reRankedResults, threshold, filters, limit);
 
+            // Cross-encoder second pass over the top-K (first-pass order if unavailable/over budget)
+            const crossEncoded = await this.applyCrossEncoder(trimmedQuery, filteredResults, fusedResults, signal);
+
             // Apply clustering if enabled
             const embeddingService = this.semanticSearch?.getEmbeddingService() ?? null;
             const finalResults = await applyClusteringIfEnabled(
-                filteredResults,
+                crossEncoded.results,
                 embeddingService,
                 this.settings,
                 { signal },
@@ -298,8 +317,11 @@ export class HybridSearchService {
                 return [];
             }
 
-            // Cache results (searches are recorded on selection, not per keystroke)
-            this.addToCache(cacheKey, finalResults);
+            // Cache results (searches are recorded on selection, not per keystroke). Results
+            // that should have been reranked are not cached, so the next search retries.
+            if (crossEncoded.status !== 'skipped-pending') {
+                this.addToCache(cacheKey, finalResults);
+            }
 
             const elapsed = Date.now() - startTime;
             logger.debug(`HybridSearchService: Search completed in ${elapsed}ms, returning ${finalResults.length} results`);
@@ -439,7 +461,7 @@ export class HybridSearchService {
 
             // Apply clustering if enabled
             const embeddingService = this.semanticSearch?.getEmbeddingService() ?? null;
-            const finalResults = await applyClusteringIfEnabled(
+            let finalResults = await applyClusteringIfEnabled(
                 filteredResults,
                 embeddingService,
                 this.settings,
@@ -450,8 +472,34 @@ export class HybridSearchService {
                 return;
             }
 
+            // Cross-encoder second pass: show the first-pass order now, then the reranked order
+            let cacheable = true;
+            if (this.crossEncoder && filteredResults.length > 1) {
+                if (this.crossEncoder.isReady()) {
+                    onUpdate(finalResults, 'fused');
+                }
+                const crossEncoded = await this.applyCrossEncoder(trimmedQuery, filteredResults, fusedResults, signal);
+                if (signal?.aborted) {
+                    return;
+                }
+                cacheable = crossEncoded.status !== 'skipped-pending';
+                if (crossEncoded.status === 'applied') {
+                    finalResults = await applyClusteringIfEnabled(
+                        crossEncoded.results,
+                        embeddingService,
+                        this.settings,
+                        { signal },
+                    );
+                    if (signal?.aborted) {
+                        return;
+                    }
+                }
+            }
+
             // Cache results (searches are recorded on selection, not per keystroke)
-            this.addToCache(cacheKey, finalResults);
+            if (cacheable) {
+                this.addToCache(cacheKey, finalResults);
+            }
 
             const elapsed = Date.now() - startTime;
             logger.debug(`HybridSearchService: Stream search completed in ${elapsed}ms, returning ${finalResults.length} results (phase: complete)`);
@@ -461,6 +509,62 @@ export class HybridSearchService {
             logger.error('HybridSearchService: Stream search failed', error);
             onUpdate([], 'complete');
         }
+    }
+
+    /**
+     * Reorder the top-K results with the cross-encoder (see rerank-blend.ts for the
+     * blending rationale). Passages use the best semantic chunk when semantic search
+     * matched the note, else the title and excerpt/snippet.
+     *
+     * Status 'skipped-pending' means a reranker is configured but could not score in
+     * time (model loading, budget exceeded, error): results keep their first-pass order
+     * and should not be cached.
+     */
+    private async applyCrossEncoder(
+        query: string,
+        results: HybridSearchResult[],
+        fusedResults: FusedResult[],
+        signal?: AbortSignal,
+    ): Promise<{ results: HybridSearchResult[]; status: 'applied' | 'not-configured' | 'skipped-pending' | 'aborted' }> {
+        const reranker = this.crossEncoder;
+        if (!reranker || results.length < 2) {
+            return { results, status: 'not-configured' };
+        }
+
+        const chunkByPath = new Map<string, string>();
+        fusedResults.forEach((fused) => {
+            const chunk = fused.semanticResult?.matchedChunkText;
+            if (chunk) {
+                chunkByPath.set(fused.path, chunk);
+            }
+        });
+
+        const topK = Math.min(reranker.getTopK(), results.length);
+        const window = results.slice(0, topK);
+        const outcome = await reranker.rerank(query, window.map((result) => ({
+            id: result.path,
+            passage: buildRerankPassage(result.file, this.app.metadataCache, chunkByPath.get(result.path) ?? result.excerpt),
+        })), { signal });
+
+        if (outcome.status !== 'applied') {
+            logger.debug(`HybridSearchService: Cross-encoder skipped (${outcome.status}) after ${outcome.elapsedMs}ms`);
+            return { results, status: HybridSearchService.toSkipStatus(outcome.status) };
+        }
+
+        const scored = window.map((result) => {
+            const logit = outcome.scores.get(result.path);
+            return logit === undefined ? result : { ...result, rerankScore: sigmoid(logit) };
+        });
+        const reordered = fuseRerankOrder(scored, (result) => result.rerankScore, (result) => result.finalScore);
+        logger.debug(`HybridSearchService: Cross-encoder reranked top ${topK} in ${outcome.elapsedMs}ms`);
+        return { results: [...reordered, ...results.slice(topK)], status: 'applied' };
+    }
+
+    private static toSkipStatus(status: RerankStatus): 'skipped-pending' | 'aborted' | 'not-configured' {
+        if (status === 'aborted') {
+            return 'aborted';
+        }
+        return status === 'disabled' ? 'not-configured' : 'skipped-pending';
     }
 
     /**
@@ -534,6 +638,8 @@ export class HybridSearchService {
                 limit: searchLimit,
                 useCache: true,
                 signal,
+                // The cross-encoder runs once on the final hybrid ordering instead
+                rerank: false,
             });
             logger.debug(`HybridSearchService: Semantic search returned ${results.length} results`);
             return results;
@@ -693,6 +799,7 @@ export class HybridSearchService {
      */
     destroy(): void {
         this.clearCache();
+        this.crossEncoder = null;
         this.linkGraphService = null;
         this.isInitialized = false;
         logger.debug('HybridSearchService: Destroyed');

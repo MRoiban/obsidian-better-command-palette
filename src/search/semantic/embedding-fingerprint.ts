@@ -5,7 +5,9 @@
 
 import { SemanticSearchSettings } from './types';
 import type { EmbeddingProviderId } from './providers/types';
-import { getLocalInputScheme, resolveLocalDtype, resolveLocalModel } from './providers/model-registry';
+import {
+    LocalModelDefinition, getLocalInputScheme, resolveLocalDtype, resolveLocalModel, resolveMatryoshkaDimension,
+} from './providers/model-registry';
 
 export const DEFAULT_EMBEDDING_MODEL = 'nomic-embed-text';
 
@@ -13,7 +15,8 @@ export const DEFAULT_EMBEDDING_MODEL = 'nomic-embed-text';
  * Version of how text is turned into embedding input (task prefixes, chunk
  * context, etc.). Bump this whenever that changes so cached vectors are rebuilt.
  * 'raw-v1' = chunk text sent as-is, no task prefixes.
- * Local models append their own prefix scheme (see getLocalInputScheme).
+ * Local models append their own prefix scheme (see getLocalInputScheme) and, when
+ * vectors are truncated (Matryoshka), the truncated size.
  */
 export const EMBEDDING_INPUT_SCHEME = 'raw-v1';
 
@@ -21,7 +24,7 @@ export const EMBEDDING_INPUT_SCHEME = 'raw-v1';
 export const LOCAL_MODEL_IDENTITY_PREFIX = 'local:';
 
 export type FingerprintSettings = Pick<SemanticSearchSettings, 'embeddingModel'>
-    & Partial<Pick<SemanticSearchSettings, 'embeddingProvider' | 'localModel' | 'localCustomModelId' | 'localDtype' | 'localDevice'>>;
+    & Partial<Pick<SemanticSearchSettings, 'embeddingProvider' | 'localModel' | 'localCustomModelId' | 'localDtype' | 'localDevice' | 'localEmbeddingDimension'>>;
 
 export interface EmbeddingFingerprint {
     provider: EmbeddingProviderId;
@@ -59,17 +62,42 @@ export function resolveEmbeddingModel(settings: FingerprintSettings): string {
 export function describeEmbeddingModel(settings: FingerprintSettings): string {
     if (resolveEmbeddingProviderId(settings) === 'local') {
         const model = resolveLocalModel(settings);
-        return `${model.hfModelId} (${resolveLocalDtype(model, settings.localDtype, settings.localDevice)}, in-plugin)`;
+        const truncation = resolveMatryoshkaDimension(model, settings.localEmbeddingDimension);
+        const details: string[] = [resolveLocalDtype(model, settings.localDtype, settings.localDevice)];
+        if (truncation !== undefined) {
+            details.push(`${truncation} dims`);
+        }
+        details.push('in-plugin');
+        return `${model.hfModelId} (${details.join(', ')})`;
     }
     return `${resolveOllamaModel(settings)} (Ollama)`;
+}
+
+/** The configured local model, or undefined when another provider is active. */
+export function resolveActiveLocalModel(settings: FingerprintSettings): LocalModelDefinition | undefined {
+    return resolveEmbeddingProviderId(settings) === 'local' ? resolveLocalModel(settings) : undefined;
+}
+
+/**
+ * Size vectors are truncated to (Matryoshka), or undefined for the model's full output.
+ * Only local models that declare the requested size support it.
+ */
+export function resolveEmbeddingTruncation(settings: FingerprintSettings): number | undefined {
+    const model = resolveActiveLocalModel(settings);
+    return model ? resolveMatryoshkaDimension(model, settings.localEmbeddingDimension) : undefined;
 }
 
 /** Fingerprint derivable from settings alone (provider + model + input scheme). */
 export function getSettingsFingerprint(settings: FingerprintSettings): EmbeddingFingerprint {
     const provider = resolveEmbeddingProviderId(settings);
-    const scheme = provider === 'local'
-        ? `${EMBEDDING_INPUT_SCHEME}+${getLocalInputScheme(resolveLocalModel(settings))}`
-        : EMBEDDING_INPUT_SCHEME;
+    let scheme = EMBEDDING_INPUT_SCHEME;
+    if (provider === 'local') {
+        scheme += `+${getLocalInputScheme(resolveLocalModel(settings))}`;
+        const truncation = resolveEmbeddingTruncation(settings);
+        if (truncation !== undefined) {
+            scheme += `+mrl-${truncation}`;
+        }
+    }
 
     return {
         provider,

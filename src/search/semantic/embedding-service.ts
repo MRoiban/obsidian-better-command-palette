@@ -16,7 +16,8 @@ import {
     readLegacyEmbeddingRecords,
 } from './embedding-store';
 import {
-    EmbeddingFingerprint, fingerprintKey, getSettingsFingerprint, isFingerprintCompatible, resolveEmbeddingModel,
+    EmbeddingFingerprint, fingerprintKey, getSettingsFingerprint, isFingerprintCompatible, resolveActiveLocalModel,
+    resolveEmbeddingModel, resolveEmbeddingTruncation,
 } from './embedding-fingerprint';
 import { NonRetryableEmbeddingError } from './http-utils';
 import {
@@ -26,6 +27,7 @@ import {
     EmbeddingProviderContext, createEmbeddingProvider, getProviderConfigKey,
 } from './providers/provider-factory';
 import { createAbortError, isAbortError, throwIfAborted } from './providers/abort-utils';
+import { formatEmbeddingInput, truncateEmbedding, usesDocumentTitle } from './providers/model-registry';
 import { logger } from '../../utils/logger';
 import { generateContentHashBase36 } from '../../utils/hash';
 import { getVaultScopedName } from '../../utils/vault-storage';
@@ -42,6 +44,15 @@ export interface ChunkEmbeddingRuntime {
 interface EmbeddingRequestOptions {
     signal?: AbortSignal;
     timeoutMs?: number;
+    /** Document title for models with a separate title input field. */
+    title?: string;
+}
+
+/** Chunks of one note, ready to embed. */
+interface ChunkedDocument {
+    chunks: string[];
+    /** Set when the model takes the title as a separate input (it is then not repeated in the chunk text). */
+    title?: string;
 }
 
 export type EmbeddingProviderFactory = (
@@ -692,24 +703,52 @@ export class EmbeddingService {
     }
 
     /**
-     * Chunk document into semantic units of 2-4 sentences (~300-400 tokens each)
-     * Each chunk includes the file title and tags for context
+     * Title of a note for title-aware embedding templates: the frontmatter `title`
+     * when it is a non-empty string, otherwise the file name.
      */
-    private chunkDocument(content: string, file: TFile): string[] {
+    private getDocumentTitle(file: TFile, frontmatter: Record<string, unknown> | undefined): string {
+        const frontmatterTitle = frontmatter?.title;
+        if (typeof frontmatterTitle === 'string' && frontmatterTitle.trim()) {
+            return frontmatterTitle.trim();
+        }
+        return file.basename;
+    }
+
+    /**
+     * Chunk document into semantic units of 2-4 sentences (~300-400 tokens each).
+     * Each chunk carries context: the title and tags in the chunk text, or, for models
+     * with a separate title field, only the tags (the title is returned separately).
+     */
+    private chunkDocument(content: string, file: TFile): ChunkedDocument {
         const metadata = this.metadataCache.getFileCache(file);
         const targetChunkSize = this.settings.chunkSize || 400; // ~300-400 tokens target
 
-        // Build context prefix with title and tags
-        const prefix = file.basename;
+        const localModel = resolveActiveLocalModel(this.settings);
+        const title = localModel && usesDocumentTitle(localModel)
+            ? this.getDocumentTitle(file, metadata?.frontmatter)
+            : undefined;
+
+        // Build context prefix with title (unless passed separately) and tags
         const tags = metadata?.tags?.map((tag) => tag.tag.replace('#', '')).join(' ') || '';
-        const contextPrefix = tags ? `${prefix} ${tags}` : prefix;
-        const prefixLength = contextPrefix.length + 2; // +2 for ": "
+        const contextParts = title === undefined ? [file.basename, tags] : [tags];
+        const contextPrefix = contextParts.filter((part) => part.length > 0).join(' ');
+        const withContext = (body: string) => (contextPrefix ? `${contextPrefix}: ${body}` : body);
+
+        // Characters of model input around the chunk body; capped so long titles still leave room
+        let prefixLength = contextPrefix ? contextPrefix.length + 2 : 0; // +2 for ": "
+        if (title !== undefined && localModel) {
+            prefixLength += formatEmbeddingInput(localModel, '', 'document', title).length;
+        }
+        prefixLength = Math.min(prefixLength, Math.floor(targetChunkSize / 2));
+        const bodyBudget = targetChunkSize - prefixLength;
+        // Previous behavior for models without a title field (prefix excluded from the fallback cut)
+        const fallbackLength = title === undefined ? targetChunkSize : bodyBudget;
 
         // Split content into sentences
         const sentences = this.splitIntoSentences(content);
 
         if (sentences.length === 0) {
-            return [`${contextPrefix}: ${content.substring(0, targetChunkSize)}`];
+            return { title, chunks: [withContext(content.substring(0, fallbackLength))] };
         }
 
         const chunks: string[] = [];
@@ -725,14 +764,14 @@ export class EmbeddingService {
             const sentenceLength = sentence.length;
 
             // Check if adding this sentence would exceed target size
-            const wouldExceed = currentLength + sentenceLength > targetChunkSize - prefixLength;
+            const wouldExceed = currentLength + sentenceLength > bodyBudget;
             const hasMinSentences = currentChunk.length >= minSentences;
             const hasMaxSentences = currentChunk.length >= maxSentences;
 
             // Finalize current chunk if we have enough sentences or would exceed size
             if ((wouldExceed && hasMinSentences) || hasMaxSentences) {
                 if (currentChunk.length > 0) {
-                    chunks.push(`${contextPrefix}: ${currentChunk.join(' ')}`);
+                    chunks.push(withContext(currentChunk.join(' ')));
                 }
                 currentChunk = [];
                 currentLength = 0;
@@ -745,10 +784,13 @@ export class EmbeddingService {
 
         // Don't forget the last chunk
         if (currentChunk.length > 0) {
-            chunks.push(`${contextPrefix}: ${currentChunk.join(' ')}`);
+            chunks.push(withContext(currentChunk.join(' ')));
         }
 
-        return chunks.length > 0 ? chunks : [`${contextPrefix}: ${content.substring(0, targetChunkSize)}`];
+        return {
+            title,
+            chunks: chunks.length > 0 ? chunks : [withContext(content.substring(0, fallbackLength))],
+        };
     }
 
     /**
@@ -873,8 +915,9 @@ export class EmbeddingService {
     }
 
     /**
-     * Embed several texts with one provider call. Vectors are normalized; the first
-     * vector of a generation defines the expected dimension.
+     * Embed several texts with one provider call. Vectors are truncated to the configured
+     * Matryoshka size (local models that support it) and normalized; the first vector of a
+     * generation defines the expected dimension.
      */
     async generateEmbeddings(
         texts: string[],
@@ -891,10 +934,13 @@ export class EmbeddingService {
 
         const timeoutMs = Math.max(500, options.timeoutMs ?? this.settings.searchTimeoutMs ?? 8000);
         const generationAtStart = this.generation;
+        // Captured with the request: a later dimension change is a fingerprint change and bumps the generation
+        const truncation = resolveEmbeddingTruncation(this.settings);
         const rawVectors = await this.getProvider().embed(texts, this.toEmbeddingKind(taskType), {
             signal: options.signal,
             timeoutMs,
             retries,
+            title: options.title,
         });
 
         if (rawVectors.length !== texts.length) {
@@ -905,7 +951,8 @@ export class EmbeddingService {
             if (raw.length === 0) {
                 throw new Error('Invalid embedding response: missing or empty embedding');
             }
-            const vec = this.normalizeVector(raw);
+            // Matryoshka truncation (queries and documents alike), then unit length
+            const vec = this.normalizeVector(truncateEmbedding(raw, truncation));
             if (this.expectedDimension === undefined) {
                 // Do not let a response from before an invalidation define the new dimension
                 if (generationAtStart === this.generation) {
@@ -1117,7 +1164,7 @@ export class EmbeddingService {
                 return 'skipped';
             }
 
-            const chunks = this.chunkDocument(content, file);
+            const { chunks, title } = this.chunkDocument(content, file);
 
             if (chunks.length === 0 || (chunks.length === 1 && chunks[0]?.trim().length === 0)) {
                 return 'skipped';
@@ -1141,6 +1188,7 @@ export class EmbeddingService {
                     const embeddings = await this.generateEmbeddings(batch, 'search_document', 3, {
                         signal: options.signal,
                         timeoutMs: this.settings.indexingRequestTimeoutMs ?? 30000,
+                        title,
                     });
 
                     if (generationAtStart !== this.generation) {

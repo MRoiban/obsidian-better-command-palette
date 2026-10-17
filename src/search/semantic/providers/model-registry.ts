@@ -32,7 +32,19 @@ export interface LocalModelDefinition {
     /** Inputs are truncated to this many tokens. */
     maxTokens: number;
     queryPrefix: string;
+    /** Prepended to document chunks. Ignored when `documentTemplate` is set. */
     documentPrefix: string;
+    /**
+     * Full document input template with `{title}` and `{text}` placeholders, for models
+     * trained with a separate title field (e.g. EmbeddingGemma). When the template uses
+     * `{title}`, the note title is passed separately and not repeated in the chunk text.
+     */
+    documentTemplate?: string;
+    /**
+     * Output sizes the model was trained to be truncated to (Matryoshka representation
+     * learning), largest first. Truncated vectors must be re-normalized.
+     */
+    matryoshkaDimensions?: number[];
     pooling: LocalPooling;
     /**
      * Precision used when the precision setting is 'auto' and the device setting is
@@ -145,7 +157,9 @@ export const LOCAL_MODELS: readonly LocalModelDefinition[] = [
         languages: 'Multilingual (100+ languages)',
         maxTokens: 512,
         queryPrefix: 'task: search result | query: ',
-        documentPrefix: 'title: none | text: ',
+        documentPrefix: '',
+        documentTemplate: 'title: {title} | text: {text}',
+        matryoshkaDimensions: [768, 512, 256, 128],
         pooling: 'model',
         defaultDtype: 'q4',
         wasmDefaultDtype: 'q4',
@@ -219,8 +233,29 @@ export function resolveLocalDtype(
     return device === 'wasm' ? model.wasmDefaultDtype : model.defaultDtype;
 }
 
-/** Text actually fed to the model for a query or a document chunk. */
-export function formatEmbeddingInput(model: LocalModelDefinition, text: string, kind: 'query' | 'document'): string {
+/** Title used by title-aware templates when a document has none (EmbeddingGemma convention). */
+export const MISSING_DOCUMENT_TITLE = 'none';
+
+/** Whether the model takes the document title as a separate input field. */
+export function usesDocumentTitle(model: LocalModelDefinition): boolean {
+    return !!model.documentTemplate?.includes('{title}');
+}
+
+/**
+ * Text actually fed to the model for a query or a document chunk.
+ * `title` is only used by document templates with a `{title}` placeholder.
+ */
+export function formatEmbeddingInput(
+    model: LocalModelDefinition,
+    text: string,
+    kind: 'query' | 'document',
+    title?: string,
+): string {
+    if (kind === 'document' && model.documentTemplate) {
+        const cleanTitle = title?.replace(/\s+/g, ' ').trim() || MISSING_DOCUMENT_TITLE;
+        // Single pass so placeholders inside the title or text are never expanded.
+        return model.documentTemplate.replace(/\{(title|text)\}/g, (_match, key: string) => (key === 'title' ? cleanTitle : text));
+    }
     const prefix = kind === 'query' ? model.queryPrefix : model.documentPrefix;
     return prefix ? `${prefix}${text}` : text;
 }
@@ -228,17 +263,68 @@ export function formatEmbeddingInput(model: LocalModelDefinition, text: string, 
 /**
  * Identifier of how inputs are prepared for this model (prefixes, pooling, truncation).
  * Changes whenever any of those change, so cached vectors are rebuilt.
+ * Optional fields are only appended when set, so adding them leaves other models' ids unchanged.
  */
 export function getLocalInputScheme(model: LocalModelDefinition): string {
-    const descriptor = [model.queryPrefix, model.documentPrefix, model.pooling, model.maxTokens].join('|');
-    return `prefix-v1:${generateContentHash(descriptor)}`;
+    const parts: Array<string | number> = [model.queryPrefix, model.documentPrefix, model.pooling, model.maxTokens];
+    if (model.documentTemplate) {
+        parts.push(`template=${model.documentTemplate}`);
+    }
+    return `prefix-v1:${generateContentHash(parts.join('|'))}`;
 }
 
-/** One-line summary for settings, e.g. "384 dims · English · ~34 MB (q8)". */
-export function describeLocalModel(model: LocalModelDefinition, dtype: LocalDtype): string {
+/** Whether the model supports Matryoshka truncation. */
+export function supportsMatryoshka(model: LocalModelDefinition): boolean {
+    return (model.matryoshkaDimensions?.length ?? 0) > 0;
+}
+
+/**
+ * Size to truncate vectors to, or undefined to keep the full output. Only sizes the
+ * model was trained for and smaller than its full dimension are honored.
+ */
+export function resolveMatryoshkaDimension(model: LocalModelDefinition, requested: number | undefined): number | undefined {
+    if (!requested || requested <= 0 || !model.matryoshkaDimensions?.includes(requested)) {
+        return undefined;
+    }
+    if (model.dimension !== undefined && requested >= model.dimension) {
+        return undefined;
+    }
+    return requested;
+}
+
+/**
+ * Keep the first `dimension` components and re-normalize to unit length.
+ * Returns the input unchanged when it is already that size or smaller.
+ */
+export function truncateEmbedding(vector: Float32Array, dimension: number | undefined): Float32Array {
+    if (!dimension || vector.length <= dimension) {
+        return vector;
+    }
+    // slice (not subarray) so the full-size buffer can be released
+    const truncated = vector.slice(0, dimension);
+    let normSquared = 0;
+    for (let i = 0; i < truncated.length; i++) {
+        const value = truncated[i] || 0;
+        normSquared += value * value;
+    }
+    const norm = Math.sqrt(normSquared);
+    if (norm > 0) {
+        for (let i = 0; i < truncated.length; i++) {
+            truncated[i] = (truncated[i] || 0) / norm;
+        }
+    }
+    return truncated;
+}
+
+/**
+ * One-line summary for settings, e.g. "384 dims · English · ~34 MB (q8)".
+ * `dimension` overrides the model's output size (Matryoshka truncation).
+ */
+export function describeLocalModel(model: LocalModelDefinition, dtype: LocalDtype, dimension?: number): string {
     const parts: string[] = [];
-    if (model.dimension) {
-        parts.push(`${model.dimension} dims`);
+    const dims = dimension ?? model.dimension;
+    if (dims) {
+        parts.push(model.dimension && dims !== model.dimension ? `${dims} of ${model.dimension} dims` : `${dims} dims`);
     }
     parts.push(model.languages);
     const size = model.downloadSizes?.[dtype];

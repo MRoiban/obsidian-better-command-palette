@@ -16,6 +16,9 @@ import type { SemanticSearchSettings } from './search/semantic/types';
 import type { EmbeddingProviderId } from './search/semantic/providers/types';
 import { describeEmbeddingModel } from './search/semantic/embedding-fingerprint';
 import { HybridSearchService } from './search/hybrid/hybrid-search-service';
+import {
+    RerankService, RerankTestResult, createRerankService, getRerankerConfigKey, isRerankerEnabled, clampRerankTopK,
+} from './search/semantic/rerank';
 import { FileUsageTracker } from './search/usage-tracker';
 import { LinkGraphService } from './search/link-graph-service';
 import { FileMatchCacheService } from './search/file-match-cache-service';
@@ -75,6 +78,12 @@ export default class BetterCommandPalettePlugin extends Plugin {
     private semanticTransition: Promise<void> = Promise.resolve();
 
     private semanticRibbonEl?: HTMLElement;
+
+    /** Optional cross-encoder second pass (semantic + hybrid); its worker starts lazily. */
+    private rerankService?: RerankService;
+
+    /** Model/device of the running reranker; a change replaces its worker. */
+    private rerankConfigKey?: string;
 
     async onload() {
         logger.info('Loading plugin: Better Command Palette');
@@ -397,6 +406,9 @@ export default class BetterCommandPalettePlugin extends Plugin {
             this.hybridSearchService.destroy();
         }
 
+        // Terminate the reranker worker
+        this.disposeReranker();
+
         if (this.linkGraphService) {
             this.linkGraphService.destroy();
         }
@@ -469,6 +481,7 @@ export default class BetterCommandPalettePlugin extends Plugin {
             this.embeddingService = embeddingService;
             this.semanticSearchEngine = semanticSearchEngine;
             this.semanticIndexingCoordinator = coordinator;
+            this.syncReranker();
         } catch (error) {
             logger.error('Semantic search: Failed to initialize:', error);
             new Notice('Failed to initialize semantic search. Check console for details.');
@@ -588,6 +601,7 @@ export default class BetterCommandPalettePlugin extends Plugin {
                 this.settings.hybridSearch,
                 linkGraphService,
             );
+            this.hybridSearchService.setReranker(this.rerankService ?? null);
 
             this.hybridSearchService.initialize().then(async () => {
                 logger.debug('Hybrid search: Initialization complete');
@@ -971,6 +985,11 @@ export default class BetterCommandPalettePlugin extends Plugin {
             this.semanticIndexingCoordinator?.updateSettings(this.settings.semanticSearch);
         }
 
+        // Create, replace, retune or dispose the reranker (enable toggle, model, device, top-K)
+        if (semanticSettingsChanged) {
+            this.syncReranker();
+        }
+
         // Update hybrid search settings
         if (hybridSettingsChanged && this.settings.hybridSearch.enabled && !this.hybridSearchService) {
             this.initializeHybridSearch();
@@ -1000,6 +1019,63 @@ export default class BetterCommandPalettePlugin extends Plugin {
             this.linkGraphService.destroy();
             this.linkGraphService = undefined;
         }
+    }
+
+    /**
+     * Bring the reranker in line with the settings and attach it to the search services.
+     * The worker and model only start on the first rerank (or "Download & test").
+     */
+    private syncReranker(): void {
+        const settings = this.settings.semanticSearch;
+        if (!isRerankerEnabled(settings)) {
+            this.disposeReranker();
+            return;
+        }
+
+        const key = getRerankerConfigKey(settings);
+        if (this.rerankService && this.rerankConfigKey === key) {
+            this.rerankService.setTopK(clampRerankTopK(settings.rerankerTopK));
+            this.semanticSearchEngine?.setReranker(this.rerankService);
+            this.hybridSearchService?.setReranker(this.rerankService);
+            return;
+        }
+
+        this.disposeReranker();
+        this.rerankService = createRerankService(settings, {
+            adapter: this.app.vault.adapter,
+            pluginDir: this.manifest.dir ?? '',
+        });
+        this.rerankConfigKey = key;
+        logger.debug(`Reranker: Configured ${this.rerankService.label}`);
+        this.semanticSearchEngine?.setReranker(this.rerankService);
+        this.hybridSearchService?.setReranker(this.rerankService);
+    }
+
+    private disposeReranker(): void {
+        const service = this.rerankService;
+        this.rerankService = undefined;
+        this.rerankConfigKey = undefined;
+        this.semanticSearchEngine?.setReranker(null);
+        this.hybridSearchService?.setReranker(null);
+        if (service) {
+            service.dispose();
+            logger.debug('Reranker: Disposed');
+        }
+    }
+
+    /**
+     * Load (downloading on first use) the configured reranker and score a sample pair.
+     */
+    public async testReranker(): Promise<RerankTestResult> {
+        if (!isRerankerEnabled(this.settings.semanticSearch)) {
+            throw new Error('Enable semantic search and the reranker first');
+        }
+        this.syncReranker();
+        const service = this.rerankService;
+        if (!service) {
+            throw new Error('Reranker not initialized');
+        }
+        return service.test();
     }
 
     /**

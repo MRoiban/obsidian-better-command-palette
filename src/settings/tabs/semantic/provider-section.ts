@@ -12,7 +12,7 @@ import BetterCommandPalettePlugin from 'src/main';
 import {
     CUSTOM_LOCAL_MODEL_ID, DEFAULT_LOCAL_MODEL_ID, LOCAL_DTYPE_LABELS, LOCAL_MODELS, LocalDeviceSetting, LocalDtype,
     LocalDtypeSetting, LocalModelDefinition, describeLocalModel, getLocalModelDefinition, isValidHfModelId,
-    resolveLocalDtype, resolveLocalModel,
+    resolveLocalDtype, resolveLocalModel, resolveMatryoshkaDimension, supportsMatryoshka,
 } from 'src/search/semantic/providers/model-registry';
 import type { EmbeddingProviderId } from 'src/search/semantic/providers/types';
 import { DEFAULT_EMBEDDING_MODEL } from 'src/search/semantic/embedding-fingerprint';
@@ -96,6 +96,7 @@ export class EmbeddingProviderSection {
         const device: LocalDeviceSetting = settings.localDevice ?? 'auto';
         const model = resolveLocalModel(settings);
         const dtype = resolveLocalDtype(model, settings.localDtype, device);
+        const truncation = resolveMatryoshkaDimension(model, settings.localEmbeddingDimension);
         const showCustom = this.pendingCustomModel || settings.localModel === CUSTOM_LOCAL_MODEL_ID;
         const savedCustomInvalid = settings.localModel === CUSTOM_LOCAL_MODEL_ID
             && !isValidHfModelId(settings.localCustomModelId);
@@ -116,7 +117,7 @@ export class EmbeddingProviderSection {
                     });
                 } else {
                     fragment.createDiv({ text: model.description });
-                    fragment.createDiv({ text: describeLocalModel(model, dtype) });
+                    fragment.createDiv({ text: describeLocalModel(model, dtype, truncation) });
                 }
                 fragment.createDiv({ text: 'Changing the model rebuilds the semantic index.' });
             }))
@@ -134,6 +135,9 @@ export class EmbeddingProviderSection {
 
         this.renderDevice(containerEl, model, device);
         this.renderPrecision(containerEl, model, device, dtype);
+        if (supportsMatryoshka(model)) {
+            this.renderVectorSize(containerEl, model, truncation);
+        }
 
         this.renderPrepareButton(containerEl, 'Download & test model', 'Download (first use only) and load the selected model now, instead of on the first search');
     }
@@ -275,6 +279,32 @@ export class EmbeddingProviderSection {
                     .setValue(current)
                     .onChange(async (value) => {
                         settings.localDtype = value as LocalDtypeSetting;
+                        await this.saveAndRerender();
+                    });
+            });
+    }
+
+    /** Matryoshka truncation, for models trained to support it. 0 = full dimension. */
+    private renderVectorSize(containerEl: HTMLElement, model: LocalModelDefinition, truncation: number | undefined): void {
+        const { settings } = this;
+        const fullLabel = model.dimension ? `${model.dimension} (full)` : 'Full';
+
+        new Setting(containerEl)
+            .setName('Vector size')
+            .setDesc(describe((fragment) => {
+                fragment.createDiv({ text: 'Dimensions kept per vector. Smaller vectors use less storage and search faster, with a slight loss in quality.' });
+                fragment.createDiv({ text: 'Changing the vector size rebuilds the semantic index.' });
+            }))
+            .addDropdown((dropdown) => {
+                dropdown.addOption('0', fullLabel);
+                (model.matryoshkaDimensions ?? [])
+                    .filter((size) => resolveMatryoshkaDimension(model, size) !== undefined)
+                    .forEach((size) => dropdown.addOption(String(size), String(size)));
+                dropdown
+                    .setValue(String(truncation ?? 0))
+                    .onChange(async (value) => {
+                        const size = Number(value);
+                        settings.localEmbeddingDimension = Number.isFinite(size) && size > 0 ? size : 0;
                         await this.saveAndRerender();
                     });
             });

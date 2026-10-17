@@ -14,9 +14,11 @@ export type HybridResultSource = 'keyword' | 'semantic' | 'both';
 /**
  * Phase of streaming search results
  * - 'keyword': Fast initial results from keyword search only
- * - 'complete': Final fused & re-ranked results
+ * - 'fused': Fused & re-ranked first-pass results, emitted before the cross-encoder
+ *   reranker reorders them (only when a reranker is loaded)
+ * - 'complete': Final results
  */
-export type StreamingPhase = 'keyword' | 'complete';
+export type StreamingPhase = 'keyword' | 'fused' | 'complete';
 
 /**
  * Match details for explaining why a result was returned
@@ -97,6 +99,8 @@ export interface HybridSearchResult {
     reRankBoost: number;
     /** Optional explainable scoring details for debugging and tuning */
     scoreBreakdown?: HybridScoreBreakdown;
+    /** Cross-encoder relevance probability (0-1), when the second-pass reranker scored this result */
+    rerankScore?: number;
 
     // Source tracking
     /** Which search system(s) returned this result */

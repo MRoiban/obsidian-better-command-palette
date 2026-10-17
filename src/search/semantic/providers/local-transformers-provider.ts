@@ -125,7 +125,7 @@ export class LocalTransformersProvider implements EmbeddingProvider {
 
         return new Promise<Float32Array[]>((resolve, reject) => {
             const job: EmbedJob = {
-                texts: texts.map((text) => formatEmbeddingInput(this.config.model, text, kind)),
+                texts: texts.map((text) => formatEmbeddingInput(this.config.model, text, kind, options.title)),
                 kind,
                 timeoutMs: Math.max(500, options.timeoutMs ?? DEFAULT_TIMEOUT_MS),
                 signal: options.signal,

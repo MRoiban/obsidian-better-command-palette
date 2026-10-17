@@ -2,6 +2,7 @@ import { App, Setting, Notice } from 'obsidian';
 import BetterCommandPalettePlugin from 'src/main';
 import { BaseSettingsTab } from './base-tab';
 import { EmbeddingProviderSection } from './semantic/provider-section';
+import { RerankerSection } from './semantic/reranker-section';
 
 export class SemanticTab implements BaseSettingsTab {
     id = 'semantic';
@@ -10,10 +11,13 @@ export class SemanticTab implements BaseSettingsTab {
 
     private providerSection?: EmbeddingProviderSection;
 
+    private rerankerSection?: RerankerSection;
+
     display(containerEl: HTMLElement, app: App, plugin: BetterCommandPalettePlugin): void {
         // Own a root element so re-renders replace the tab content instead of appending to it
         const rootEl = containerEl.createDiv();
         this.providerSection = new EmbeddingProviderSection(plugin, () => this.render(rootEl, plugin));
+        this.rerankerSection = new RerankerSection(plugin, () => this.render(rootEl, plugin));
         this.render(rootEl, plugin);
     }
 
@@ -42,6 +46,7 @@ export class SemanticTab implements BaseSettingsTab {
         }
 
         this.providerSection?.render(containerEl);
+        this.rerankerSection?.render(containerEl);
 
         new Setting(containerEl).setName('Search Parameters').setHeading();
 

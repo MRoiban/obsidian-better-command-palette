@@ -6,10 +6,28 @@ import { TFile, Vault, MetadataCache } from 'obsidian';
 import { EmbeddingService } from './embedding-service';
 import { SemanticSearchResult, SemanticSearchSettings } from './types';
 import { LruCache } from './lru-cache';
+import type { RerankService } from './rerank/rerank-service';
+import { buildRerankPassage } from './rerank/rerank-passage';
+import { sigmoid } from './rerank/rerank-blend';
 import { logger } from '../../utils/logger';
 
 const SEARCH_CACHE_MAX_SIZE = 100;
 const QUERY_EMBEDDING_CACHE_MAX_SIZE = 64;
+
+/** Weight of the semantic term in the relevance score (the rest are metadata bonuses). */
+const SIMILARITY_WEIGHT = 0.6;
+
+export interface SemanticSearchOptions {
+    limit?: number;
+    threshold?: number;
+    useCache?: boolean;
+    signal?: AbortSignal;
+    /**
+     * Apply the second-pass reranker when one is configured (default true). Hybrid
+     * search passes false and reranks its fused list instead.
+     */
+    rerank?: boolean;
+}
 
 export class SemanticSearchEngine {
     private embeddingService: EmbeddingService;
@@ -30,6 +48,9 @@ export class SemanticSearchEngine {
     /** Query text -> query vector, so the same query with a different limit/threshold is not re-embedded. */
     private queryEmbeddingCache = new LruCache<string, Float32Array>(QUERY_EMBEDDING_CACHE_MAX_SIZE);
 
+    /** Optional cross-encoder for the second pass; owned (created/disposed) by the plugin. */
+    private reranker: RerankService | null = null;
+
     constructor(embeddingService: EmbeddingService, vault: Vault, metadataCache: MetadataCache, settings: SemanticSearchSettings) {
         this.embeddingService = embeddingService;
         this.vault = vault;
@@ -37,12 +58,63 @@ export class SemanticSearchEngine {
         this.settings = settings;
     }
 
-    async search(query: string, options: {
-        limit?: number;
-        threshold?: number;
-        useCache?: boolean;
-        signal?: AbortSignal;
-    } = {}): Promise<SemanticSearchResult[]> {
+    setReranker(reranker: RerankService | null): void {
+        this.reranker = reranker;
+    }
+
+    /**
+     * First-pass vector search (cached), then, when a reranker is set, a cross-encoder
+     * pass over the top-K within its time budget. Without a loaded model, or when the
+     * budget is exceeded, the first-pass order is returned unchanged.
+     */
+    async search(query: string, options: SemanticSearchOptions = {}): Promise<SemanticSearchResult[]> {
+        const { rerank = true, ...firstPassOptions } = options;
+        const results = await this.searchFirstPass(query, firstPassOptions);
+        const { reranker } = this;
+        if (!rerank || !reranker || results.length < 2 || options.signal?.aborted) {
+            return results;
+        }
+        return this.applyRerank(reranker, query, results, options.signal);
+    }
+
+    /**
+     * Rescore the top-K: the reranker's relevance probability replaces the cosine
+     * similarity term of the relevance score; metadata bonuses are kept (see rerank-blend.ts).
+     */
+    private async applyRerank(
+        reranker: RerankService,
+        query: string,
+        results: SemanticSearchResult[],
+        signal?: AbortSignal,
+    ): Promise<SemanticSearchResult[]> {
+        const topK = Math.min(reranker.getTopK(), results.length);
+        const window = results.slice(0, topK);
+        const outcome = await reranker.rerank(query, window.map((result) => ({
+            id: result.file.path,
+            passage: buildRerankPassage(result.file, this.metadataCache, result.matchedChunkText ?? result.excerpt),
+        })), { signal });
+
+        if (outcome.status !== 'applied') {
+            logger.debug(`Semantic search: Rerank skipped (${outcome.status}) after ${outcome.elapsedMs}ms`);
+            return results;
+        }
+
+        const reranked = window
+            .map((result, index) => {
+                const logit = outcome.scores.get(result.file.path);
+                const relevanceScore = logit === undefined
+                    ? result.relevanceScore
+                    : Math.min(SIMILARITY_WEIGHT * sigmoid(logit) + this.calculateRelevanceBonus(result.file, query), 1.0);
+                return { result: { ...result, relevanceScore }, index };
+            })
+            .sort((a, b) => (b.result.relevanceScore - a.result.relevanceScore) || (a.index - b.index))
+            .map((entry) => entry.result);
+
+        logger.debug(`Semantic search: Reranked top ${topK} in ${outcome.elapsedMs}ms`);
+        return [...reranked, ...results.slice(topK)];
+    }
+
+    private async searchFirstPass(query: string, options: Omit<SemanticSearchOptions, 'rerank'> = {}): Promise<SemanticSearchResult[]> {
         const startTime = Date.now();
         const { limit = this.settings.maxResults, threshold = this.settings.searchThreshold, useCache = true, signal } = options;
 
@@ -282,7 +354,12 @@ export class SemanticSearchEngine {
     }
 
     private calculateRelevanceScore(file: TFile, similarity: number, query: string): number {
-        let score = similarity * 0.6; // Base semantic similarity (reduced weight)
+        return Math.min(SIMILARITY_WEIGHT * similarity + this.calculateRelevanceBonus(file, query), 1.0);
+    }
+
+    /** Metadata part of the relevance score: title/tag/heading matches, recency, size. */
+    private calculateRelevanceBonus(file: TFile, query: string): number {
+        let score = 0;
 
         const queryLower = query.toLowerCase();
         const titleLower = file.basename.toLowerCase();
@@ -317,7 +394,7 @@ export class SemanticSearchEngine {
             score += 0.02;
         }
 
-        return Math.min(score, 1.0);
+        return score;
     }
 
     private analyzeMatches(file: TFile, query: string): {

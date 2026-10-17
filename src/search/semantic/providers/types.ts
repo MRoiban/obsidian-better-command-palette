@@ -14,6 +14,11 @@ export interface EmbedOptions {
     timeoutMs?: number;
     /** Attempts for transient failures. Providers without transient failures ignore this. */
     retries?: number;
+    /**
+     * Title of the document the texts belong to (document kind only). Used by models
+     * whose input template has a separate title field; other providers ignore it.
+     */
+    title?: string;
 }
 
 export interface ProviderAvailability {

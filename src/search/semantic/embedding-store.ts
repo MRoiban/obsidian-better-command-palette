@@ -3,12 +3,14 @@
  *
  * Each vault gets its own database (see getVaultScopedName). Older plugin
  * versions used one shared database for every vault; that legacy database is
- * only ever read (for one-time migration) and never deleted, because other
- * vaults may still need to migrate from it.
+ * only read (for one-time migration) and never deleted automatically, because
+ * other vaults may still need to migrate from it. Users can delete it explicitly
+ * (deleteLegacyEmbeddingDatabase).
  */
 
 import { FileEmbeddingData } from './types';
 import { logger } from '../../utils/logger';
+import { DatabaseDeleteOutcome, deleteIndexedDatabase } from '../../utils/indexed-db';
 
 export const LEGACY_EMBEDDING_DB_NAME = 'better-command-palette-embeddings';
 
@@ -112,6 +114,14 @@ export async function readLegacyEmbeddingRecords(): Promise<StoredEmbeddingRecor
     } finally {
         db.close();
     }
+}
+
+/**
+ * Delete the legacy shared (un-scoped) database. Vaults that have not migrated yet
+ * lose their migration source and re-embed from scratch.
+ */
+export function deleteLegacyEmbeddingDatabase(): Promise<DatabaseDeleteOutcome> {
+    return deleteIndexedDatabase(LEGACY_EMBEDDING_DB_NAME);
 }
 
 export class EmbeddingIndexedDbStore {
