@@ -1,89 +1,71 @@
-# AGENTS
+# AGENTS.md
 
-This document keeps the guidance for the different coding agents that work on this repository in one place. All agents should start with the shared repository guidelines and then check their agent-specific notes.
+Better Command Palette is an Obsidian plugin (TypeScript, bundled with rollup) that replaces the command palette with command, file, tag, semantic and hybrid search. It is a personal-use plugin, not published to the community store.
 
-## Development Principles
+This file is the shared brief for every coding agent (Codex, Claude Code, others). If the user's request conflicts with it, the user wins. If something here turns out to be wrong, say so in your summary and fix the line.
 
-- Make sure that when adding new feature, to modularize them to allow extensibility and building on top
-- Make sure to use bun and typescript
-- Make sure future components that are built will use the theming service
-- Keep code split across focused modules so it stays modular, extensible, hackable, and readable.
+## Working agreement
 
+- Treat a request as an instruction to act. Work out the scope, finish the change, verify it, then report. Don't stop to offer next steps you could just take.
+- Keep going without checking in for routine, reversible steps: reading code, editing files in this repo, building, linting, deploying to the Palace vault.
+- Stop and ask only when you can't continue without a decision from the user, or before anything hard to undo: deleting data or user files, force-pushing, rewriting published history, pushing to `master`, or touching files outside this repo (other than the deploy target below).
+- If an instruction in this file makes you pause, quote the line in your question so it can be fixed.
 
-## Shared Repository Guidelines
+## Commands
 
-### Build & Development Commands
-- Use `bun` instead of `npm` for all package operations.
-- `bun run dev` – Start the development build with auto-rebuild and the test vault.
-- `bun run build` – Production build (outputs to `dist/`).
-- `bun run build-local` – Local build for manual installation.
-- `bun run test:lint` – Run ESLint (always run this after making changes).
-- `bun run test:e2e` – Run end-to-end tests.
-- `bun run tool:gen-files` – Generate test files.
+Use `bun`, never `npm`. The lockfile is `bun.lock`.
 
-### Architecture Overview
-- **Main Entry (`src/main.ts`)**: `BetterCommandPalettePlugin` manages the plugin lifecycle, command registration, and service initialization.
-- **Primary Modal (`src/palette.ts`)**: `BetterCommandPaletteModal` extends `SuggestModal` and drives the command/file/tag search modes.
-- **Settings (`src/settings.ts`)**: Centralized configuration with type-safe defaults.
+| Command | What it does |
+| --- | --- |
+| `bun install` | Install dependencies (required before the first build: it provides the onnxruntime WASM file). |
+| `bun run build` | Production build into `dist/` (`main.js`, `styles.css`, the WASM asset). |
+| `bun run dev` | Watch build into `test-vault/.obsidian/plugins/...` (created on demand). |
+| `bun run test:typecheck` | `tsc --noEmit`. Rollup builds with type checking off, so run this separately. |
+| `bun run test:lint` | ESLint (`.eslintrc.cjs`). Must end with 0 errors; the existing warnings are known. |
+| `bun run deploy` | Build, then copy `dist/` into the Palace vault plugin folder. Keeps `data.json` and the embedding store. |
 
-#### Enhanced Search System (`src/search/`)
-- `EnhancedSearchService` coordinates indexing, caching, and performance monitoring.
-- `IndexingCoordinator` manages the file indexing lifecycle and incremental updates.
-- `MiniSearchAdapter` integrates the MiniSearch library for full-text indexing.
-- `UsageTracker` tracks search patterns for relevance scoring.
+There is no automated test suite; verification is typecheck, lint, build, and checking the change in Obsidian.
 
-#### Semantic Search System (`src/search/semantic/`)
-- `EmbeddingService` handles text embeddings via external APIs.
-- `SemanticSearchEngine` provides vector similarity search.
-- `SemanticIndexingCoordinator` manages the semantic indexing lifecycle.
-- `RequestQueue` batches and throttles API requests.
+## Definition of done
 
-### Adapter Pattern for Modal Search Modes (`src/palette-modal-adapters/`)
-- `CommandAdapter` – Obsidian commands with macro support.
-- `FileAdapter` – Baseline file search.
-- `EnhancedFileAdapter` – Advanced file search with indexing fallback.
-- `TagAdapter` – Tag-based file filtering.
+A change is done when typecheck and lint pass, `bun run build` succeeds, and the behaviour has been checked in the running app when it is user-visible (deploy, then reload the plugin). Commit the rebuilt `dist/main.js` and `dist/styles.css` with the source change; this repo tracks the build output.
 
-### Utility Systems
-- **Web Workers (`src/web-workers/`)** – Background processing for suggestions and search.
-- **Macro System (`src/utils/macro.ts`)** – Custom command sequences with delays.
-- **Logger (`src/utils/logger.ts`)** – Centralized logging (use this instead of `console`).
+Match verification to the change. Don't write tests or harnesses for small, reversible edits that would only restate the implementation.
 
-### Development Guidelines
-- Follow the strict TypeScript patterns established in the codebase.
-- Prefer async/await patterns for search operations and respect dependency injection where used.
-- New search features should go through `EnhancedSearchService` when possible, consider semantic integration, implement caching/performance monitoring, and fit the modal adapter pattern.
-- When adding settings, update the interface in `src/settings.ts`, set defaults in `DEFAULT_SETTINGS`, update the settings tab UI, and ensure changes trigger the right service updates.
-- Clean up services and workers in `onunload()`, coordinate file change monitoring with `IndexingCoordinator`, and keep large-vault memory usage in mind.
-- Modal work should extend the patterns in `palette.ts`, use the `SuggestModalAdapter` interface, maintain keyboard navigation/shortcuts, and follow the existing action type system (Commands/Files/Tags).
+## Architecture
 
-### Testing
-- E2E tests live under `test/e2e/` with helpers in `test-utils.ts`.
-- Development creates a `test-vault/` automatically.
-- Use the tooling commands to generate comprehensive test files.
+- `src/main.ts`: `BetterCommandPalettePlugin`. Lifecycle, command registration, service setup and teardown in `onunload()`.
+- `src/palette.ts`: `BetterCommandPaletteModal` (extends `SuggestModal`). Delegates each mode to an adapter.
+- `src/palette-modal-adapters/`: one adapter per mode (`command`, `file`, `enhanced-file`, `tag`, `hybrid`), all implementing `SuggestModalAdapter` from `src/utils/suggest-modal-adapter.ts`. Adapters return row data from `getSuggestionRow(match)`; they don't build DOM.
+- `src/ui/`: shared rendering. `suggestion-row.ts` renders every palette row, `suggestion-format.ts` holds the text formatters, `prompt-chrome.ts` the mode label and status line.
+- `src/search/`: keyword search. `EnhancedSearchService` coordinates `IndexingCoordinator`, `MiniSearchAdapter`, the scorer, link graph and `UsageTracker`.
+- `src/search/semantic/`: embeddings and vector search. Embeddings run in-plugin by default (`providers/local-transformers-provider.ts`, transformers.js on WebGPU in a worker); Ollama is an optional provider. `rerank/` holds the local cross-encoder reranker.
+- `src/search/hybrid/`: query parsing, fusion of keyword and semantic results, re-ranking, clustering.
+- `src/web-workers/`: suggestion, search, embedding and reranker workers, inlined by `rollup-plugin-web-worker-loader`.
+- `src/settings.ts`: the settings interface and `DEFAULT_SETTINGS`. `src/settings/`: the settings tab, one file per tab under `tabs/`, shared helpers in `utils/setting-helpers.ts`.
+- `src/styles.scss` imports `src/styles/_palette.scss` and `_settings.scss`.
 
-### Key Dependencies
-- `obsidian` – Core Obsidian API (external).
-- `fuzzysort` – Fuzzy search implementation.
-- `minisearch` – Full-text search engine.
-- `minimatch` – File pattern matching for filtering.
+## Conventions
 
-## Agent Notes
+- Keep features in small, focused modules and extend the existing seams (a new search mode is a new adapter; a new settings section is a new tab or group) instead of growing `palette.ts` or `main.ts`.
+- Log through `logger` from `src/utils/logger.ts`, never `console`.
+- New settings: add the field to the interface and `DEFAULT_SETTINGS` in `src/settings.ts`, add the control in the matching tab, and make sure the change reaches the services that read it.
+- Search work goes through `EnhancedSearchService` or the semantic/hybrid services, not ad-hoc vault scans. Keep memory use in mind; the main vault has over 1,200 notes.
+- Clean up workers, listeners and intervals in `onunload()`.
+- TypeScript is not fully strict (`strictNullChecks` is off, `noUncheckedIndexedAccess` is on). Follow the patterns in nearby code.
 
-### Claude Code (claude.ai/code)
-- Follow all shared repository guidelines above.
-- This section mirrors the expectations from `CLAUDE.md`; keep both files in sync when guidance changes.
+## UI rules
 
-### OpenAI Codex (Codex CLI)
-- Follow the shared repository guidelines above.
-- Prefer `rg`/`rg --files` for searches, avoid using `cd` in shell commands (set `workdir` instead), stick to ASCII when editing, and add only brief, high-value comments.
-- Run `bun run test:lint` before handing work off, or call out if it was skipped.
-- Coordinate with the plan/update workflow provided by the CLI when tasks are non-trivial.
+The plugin must look native in whatever theme is active (the user runs Minimal with the Flexoki scheme).
 
+- Use Obsidian's own markup: `suggestion-item mod-complex`, `suggestion-content`, `suggestion-title`, `suggestion-note`, `suggestion-aux`, `suggestion-flair`, `suggestion-hotkey`, `suggestion-highlight`, `clickable-icon`.
+- Settings use the native `SettingGroup` API (`setHeading`, `addSetting`). No custom cards, collapsible groups or icons in headings.
+- Style only with Obsidian CSS variables (`--text-muted`, `--size-4-*`, `--background-modifier-hover`, ...). No hex or rgb values in `src/styles/`, no custom fonts, no hard-coded radii or shadows.
+- Plugin classes use the `bcp-` prefix.
 
-## Again: Development Principles
+## Obsidian specifics
 
-- Make sure that when adding new feature, to modularize them to allow extensibility and building on top
-- Make sure to use bun and typescript
-- Make sure future components that are built will use the theming service
-- Keep code split across focused modules so it stays modular, extensible, hackable, and readable.
+- `dist/manifest.json` is the only manifest. `bun run version` bumps it and `versions.json`; dev and local builds copy it into their output.
+- The code uses `SettingGroup` (Obsidian 1.11+), but `minAppVersion` still says `0.12.0`.
+- Vaults: `Palace` is the deploy and test vault. `The-Academia` is read-only; never write to it.
+- The `obsidian` CLI (`obsidian vault=Palace eval|dev:screenshot|plugin:reload ...`) can drive the app. Settings open in a separate popout window, so `activeWindow` is not the main window: set `activeWindow = window; activeDocument = document` before opening a modal you want to screenshot. The CLI can hang; cap how long you wait on it.

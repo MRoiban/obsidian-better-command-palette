@@ -1,2 +1,4 @@
 node_modules
 dist/*.wasm
+test-vault/
+.DS_Store

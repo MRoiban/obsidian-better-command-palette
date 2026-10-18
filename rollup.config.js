@@ -12,7 +12,6 @@ import alias from '@rollup/plugin-alias';
 
 const isProduction = process.env.NODE_ENV === 'production';
 const isLocal = process.env.DEST === 'local';
-const includeTestFiles = process.env.TYPE === 'test';
 
 /**
  * onnxruntime-web WASM binary for the local embedding worker. Its JS glue is bundled
@@ -20,7 +19,7 @@ const includeTestFiles = process.env.TYPE === 'test';
  * to main.js so nothing is loaded from a CDN. Must match the glue's flavour (asyncify).
  */
 const ORT_WASM_ASSET = 'node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.asyncify.wasm';
-if (!includeTestFiles && !fs.existsSync(ORT_WASM_ASSET)) {
+if (!fs.existsSync(ORT_WASM_ASSET)) {
     throw new Error(`Missing ${ORT_WASM_ASSET}. Run "bun install".`);
 }
 
@@ -50,7 +49,7 @@ if (isLocal) {
 }
 
 export default {
-    input: includeTestFiles ? 'test/e2e/test.ts' : 'src/main.ts',
+    input: 'src/main.ts',
     output: {
         file: `${outputLocation}/main.js`,
         sourcemap: isProduction ? null : 'inline',
@@ -76,15 +75,13 @@ export default {
         scss({
             output: `${outputLocation}/styles.css`,
         }),
-        // eslint(),
         copy({
             targets: [
-                ...(!isLocal
-                    ? [{ src: 'manifest.json', dest: outputLocation }]
+                // dist/manifest.json is the source manifest; copy it into other build outputs.
+                ...(!isProduction
+                    ? [{ src: 'dist/manifest.json', dest: outputLocation }]
                     : []),
-                ...(!includeTestFiles
-                    ? [{ src: ORT_WASM_ASSET, dest: outputLocation }]
-                    : []),
+                { src: ORT_WASM_ASSET, dest: outputLocation },
             ],
             copyOnce: true,
         }),
