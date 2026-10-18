@@ -55,7 +55,7 @@ export const DEFAULT_SETTINGS: BetterCommandPalettePluginSettings = {
     hyperKeyOverride: false,
     displayOnlyNotesNames: false,
     hideMdExtension: false,
-    recentlyUsedText: '(recently used)',
+    recentlyUsedText: 'recent',
     macros: [],
     hotkeyStyle: 'auto',
     createNewFileMod: 'Mod',

@@ -1,0 +1,142 @@
+/* Palette styles.
+   Rows use Obsidian's own suggestion markup and the active theme styles them.
+   Only Obsidian CSS variables here: no colours of our own, borders, shadows or
+   transforms. The theme owns .prompt, .prompt-input and the selected row. */
+
+/* Mode label: faint, inside the input row. The theme lays the input out at full
+   width with the clear button absolutely positioned at its end, so the label is
+   positioned the same way, just before the clear button. */
+.bcp-mode-label {
+    position: absolute;
+    top: 50%;
+    right: var(--size-4-12);
+    transform: translateY(-50%);
+    font-size: var(--font-ui-smaller);
+    color: var(--text-faint);
+    white-space: nowrap;
+    pointer-events: none;
+}
+
+.better-command-palette .prompt-input-container:has(.bcp-mode-label) .prompt-input {
+    padding-inline-end: calc(var(--size-4-12) + 6em);
+}
+
+/* Right-hand meta text: recent label, score, tag count */
+.bcp-aux-text {
+    font-size: var(--font-ui-smaller);
+    color: var(--text-faint);
+    font-variant-numeric: tabular-nums;
+    margin-left: 10px;
+    white-space: nowrap;
+}
+
+/* Pin and alias glyphs: muted, never accent */
+.bcp-row-icon {
+    display: flex;
+    color: var(--text-faint);
+    margin-left: var(--size-4-2);
+}
+
+.suggestion-title .bcp-row-icon {
+    margin-left: 0;
+}
+
+/* Hide/unhide and the actions menu appear only on hover or selection */
+.bcp-reveal {
+    visibility: hidden;
+}
+
+.suggestion-item:hover .bcp-reveal,
+.suggestion-item.is-selected .bcp-reveal {
+    visibility: visible;
+}
+
+/* Muted inline prefix (command plugin name, "Editor: ") */
+.bcp-prefix {
+    color: var(--text-muted);
+}
+
+/* Hidden items: dimmed, same layout */
+.suggestion-item.bcp-is-hidden .suggestion-content {
+    opacity: 0.5;
+}
+
+/* Unresolved links: muted title */
+.suggestion-item.bcp-is-unresolved .suggestion-title {
+    color: var(--text-muted);
+}
+
+/* Separator dot between note parts */
+.bcp-sep {
+    color: var(--text-faint);
+    padding: 0 5px;
+}
+
+/* Status line above results (indexing, loading, reranking, errors) */
+.bcp-status {
+    display: flex;
+    align-items: center;
+    gap: var(--size-4-2);
+    padding: 0 var(--size-4-3) var(--size-4-2);
+    font-size: 12px;
+    color: var(--text-faint);
+}
+
+.bcp-status.mod-error {
+    color: var(--text-error);
+}
+
+.bcp-status .bcp-status-action {
+    margin-left: auto;
+    color: var(--text-muted);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    cursor: pointer;
+}
+
+/* "Show N hidden items": text button at the bottom of results */
+.bcp-hidden-toggle {
+    padding: var(--size-4-2) var(--size-4-3) 2px;
+    font-size: 12px;
+    color: var(--text-faint);
+    cursor: pointer;
+}
+
+.bcp-hidden-toggle:hover {
+    color: var(--text-muted);
+}
+
+/* Layout only: one-line titles and notes that ellipsize, aux that never wraps */
+.better-command-palette {
+    .suggestion-content {
+        min-width: 0;
+    }
+
+    .suggestion-title {
+        display: flex;
+        align-items: center;
+        gap: var(--size-2-3);
+        min-width: 0;
+        white-space: nowrap;
+    }
+
+    .bcp-title-text {
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+    .suggestion-note {
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+    .suggestion-aux {
+        flex-shrink: 0;
+        white-space: nowrap;
+    }
+
+    .suggestion-title .nav-file-tag {
+        flex-shrink: 0;
+    }
+}

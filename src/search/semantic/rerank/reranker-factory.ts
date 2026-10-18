@@ -11,8 +11,8 @@ import { attachRerankerLoadNotice } from './reranker-load-notice';
 import { resolveRerankerDtype, resolveRerankerModel } from './reranker-registry';
 import { RerankService } from './rerank-service';
 
-/** Tokens per (query, passage) input. Passages are ~300 tokens after MAX_RERANK_PASSAGE_CHARS. */
-export const RERANK_MAX_INPUT_TOKENS = 384;
+/** Tokens per (query, passage) input. Passages are ~150 tokens after MAX_RERANK_PASSAGE_CHARS. */
+export const RERANK_MAX_INPUT_TOKENS = 256;
 
 export const RERANK_TOP_K_MIN = 5;
 export const RERANK_TOP_K_MAX = 50;

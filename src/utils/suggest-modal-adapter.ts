@@ -3,6 +3,8 @@ import BetterCommandPalettePlugin from 'src/main';
 import BetterCommandPaletteModal from 'src/palette';
 import { Match, WorkerMode } from 'src/types/types';
 import OrderedSet from 'src/utils/ordered-set';
+import type { SuggestionRowOptions } from 'src/ui/suggestion-row';
+import type { PromptStatus } from 'src/ui/prompt-chrome';
 
 /**
  * A class that can be used by the palette modal to abstact away item specific logic between:
@@ -35,11 +37,17 @@ export default abstract class SuggestModalAdapter {
 
     private workerCorpusVersion: number;
 
-    abstract titleText: string;
+    /** Faint label shown in the input row (Commands, Files, Tags, Hybrid) */
+    abstract modeLabel: string;
 
     abstract emptyStateText: string;
 
-    abstract renderSuggestion(match: Match, content: HTMLElement, aux: HTMLElement): void;
+    /**
+     * Describe how a match renders. The palette adds the shared parts (recent label
+     * when auxText is unset, hide/unhide flair when flair is undefined, hidden state)
+     * and draws it with the shared row renderer.
+     */
+    abstract getSuggestionRow(match: Match): SuggestionRowOptions;
     abstract onChooseSuggestion(match: Match | null, event: MouseEvent | KeyboardEvent): void;
 
     /**
@@ -107,8 +115,16 @@ export default abstract class SuggestModalAdapter {
         this.workerCorpusVersion = 0;
     }
 
-    getTitleText(): string {
-        return this.titleText;
+    getModeLabel(): string {
+        return this.modeLabel;
+    }
+
+    /**
+     * Status line shown above the results (indexing, model loading, reranking).
+     * Null by default.
+     */
+    getStatus(): PromptStatus | null {
+        return null;
     }
 
     getEmptyStateText(): string {

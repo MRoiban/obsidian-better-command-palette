@@ -1,6 +1,4 @@
-import {
-    Instruction, Notice, setIcon, TFile,
-} from 'obsidian';
+import { Instruction, Notice, TFile } from 'obsidian';
 import {
     generateHotKeyText,
     getOrCreateFile,
@@ -12,9 +10,12 @@ import {
 import { Match, UnsafeAppInterface } from 'src/types/types';
 import { ActionType } from 'src/utils/constants';
 import { logger } from '../utils/logger';
+import { SuggestionRowOptions } from '../ui/suggestion-row';
+import { buildAliasRow, buildFileRow, buildUnresolvedRow } from '../ui/file-row';
+import { getAliasTarget, getQueryTerms } from '../ui/suggestion-format';
 
 export default class BetterCommandPaletteFileAdapter extends SuggestModalAdapter {
-    titleText: string;
+    modeLabel = 'Files';
 
     emptyStateText: string;
 
@@ -30,7 +31,6 @@ export default class BetterCommandPaletteFileAdapter extends SuggestModalAdapter
     initialize() {
         super.initialize();
 
-        this.titleText = 'Better Command Palette: Files';
         this.emptyStateText = 'No matching files.';
         this.fileSearchPrefix = this.plugin.settings.fileSearchPrefix;
 
@@ -95,8 +95,8 @@ export default class BetterCommandPaletteFileAdapter extends SuggestModalAdapter
             { command: generateHotKeyText({ modifiers: [], key: 'ENTER' }, this.plugin.settings), purpose: 'Open file' },
             { command: generateHotKeyText({ modifiers: [openInNewTabMod], key: 'ENTER' }, this.plugin.settings), purpose: 'Open file in new pane' },
             { command: generateHotKeyText({ modifiers: [createNewFileMod], key: 'ENTER' }, this.plugin.settings), purpose: 'Create file' },
-            { command: generateHotKeyText({ modifiers: ['Mod'], key: this.plugin.settings.commandSearchHotkey }, this.plugin.settings), purpose: 'Search Commands' },
-            { command: generateHotKeyText({ modifiers: ['Mod'], key: this.plugin.settings.tagSearchHotkey }, this.plugin.settings), purpose: 'Search Tags' },
+            { command: generateHotKeyText({ modifiers: ['Mod'], key: this.plugin.settings.commandSearchHotkey }, this.plugin.settings), purpose: 'Search commands' },
+            { command: generateHotKeyText({ modifiers: ['Mod'], key: this.plugin.settings.tagSearchHotkey }, this.plugin.settings), purpose: 'Search tags' },
         ];
     }
 
@@ -107,134 +107,24 @@ export default class BetterCommandPaletteFileAdapter extends SuggestModalAdapter
             : query;
     }
 
-    renderSuggestion(match: Match, content: HTMLElement): void {
-        let noteName = match.text;
+    getSuggestionRow(match: Match): SuggestionRowOptions {
+        const highlights = getQueryTerms(this.cleanQuery(this.palette.inputEl.value.trim()));
 
-        // Build the displayed note name without its full path if required in settings
-        if (this.plugin.settings.displayOnlyNotesNames) {
-            noteName = match.text.split('/').pop() || match.text;
-        }
-
-        // Build the displayed note name without its Markdown extension if required in settings
-        if (this.plugin.settings.hideMdExtension && noteName.endsWith('.md')) {
-            noteName = noteName.slice(0, -3);
-        }
-
-        // Create main title container
-        const suggestionEl = content.createEl('div', {
-            cls: 'suggestion-title',
-        });
-
-        // Add file type indicator
-        this.addFileTypeIndicator(suggestionEl, match.text);
-
-        // Smart path rendering - show folder structure more intelligently
-        if (!this.plugin.settings.displayOnlyNotesNames && match.text.includes('/')) {
-            this.renderSmartPath(suggestionEl, match.text, noteName);
-        } else {
-            suggestionEl.createEl('span', {
-                cls: 'path-part filename',
-                text: noteName,
-            });
-        }
-
-        // Add unresolved styling if this is an unresolved link
         if (this.unresolvedItems.has(match)) {
-            suggestionEl.addClass('unresolved');
+            return buildUnresolvedRow(match.text, highlights);
         }
 
-        // Handle aliases
-        if (match.id.includes(':')) {
-            suggestionEl.createEl('span', {
-                cls: 'suggestion-name',
-                text: match.text,
-            }).ariaLabel = 'Alias';
-
-            setIcon(suggestionEl, 'right-arrow-with-tail');
-
-            const [, path] = match.id.split(':');
-            suggestionEl.createEl('span', {
-                cls: 'suggestion-note',
-                text: path,
-            });
+        const aliasTarget = match.id.includes(':') ? getAliasTarget(match.id) : null;
+        if (aliasTarget) {
+            return buildAliasRow(match.text, aliasTarget, this.plugin.settings, highlights);
         }
 
-        // Enhanced tag rendering
-        if (match.tags && match.tags.length > 0) {
-            const tagsEl = content.createEl('div', {
-                cls: 'suggestion-note',
-            });
-
-            match.tags.forEach((tag) => {
-                if (tag.trim()) {
-                    tagsEl.createEl('span', {
-                        cls: 'tag',
-                        text: tag.startsWith('#') ? tag : `#${tag}`,
-                    });
-                }
-            });
-        }
-    }
-
-    /**
-     * Add file type indicator based on file extension
-     */
-    private addFileTypeIndicator(container: HTMLElement, filePath: string): void {
-        const extension = this.getFileExtension(filePath);
-        if (!extension) return;
-
-        let typeClass = 'md';
-        let typeText = 'MD';
-
-        switch (extension.toLowerCase()) {
-            case 'md':
-                typeClass = 'md';
-                typeText = 'MD';
-                break;
-            case 'txt':
-                typeClass = 'txt';
-                typeText = 'TXT';
-                break;
-            case 'pdf':
-                typeClass = 'pdf';
-                typeText = 'PDF';
-                break;
-            case 'png':
-            case 'jpg':
-            case 'jpeg':
-            case 'gif':
-            case 'svg':
-                typeClass = 'img';
-                typeText = 'IMG';
-                break;
-            default:
-                typeText = extension.toUpperCase().substring(0, 3);
-        }
-
-        container.createEl('span', {
-            cls: `file-type-indicator ${typeClass}`,
-            text: typeText,
+        return buildFileRow({
+            path: match.text,
+            settings: this.plugin.settings,
+            tags: match.tags,
+            highlights,
         });
-    }
-
-    /**
-     * Get file extension from path
-     */
-    private getFileExtension(path: string): string | null {
-        const match = path.match(/\.([^.]+)$/);
-        return match ? match[1] : null;
-    }
-
-    /**
-     * Smart path rendering that emphasizes filename while showing context
-     * Now relies on CSS text-overflow: ellipsis for clipping
-     */
-    private renderSmartPath(container: HTMLElement, fullPath: string, displayName: string): void {
-        // Simply set the full path and let CSS handle the ellipsis
-        container.textContent = fullPath;
-
-        // Always set the full path as tooltip
-        container.title = fullPath;
     }
 
     async onChooseSuggestion(match: Match | null, event?: MouseEvent | KeyboardEvent): Promise<void> {
@@ -263,8 +153,7 @@ export default class BetterCommandPaletteFileAdapter extends SuggestModalAdapter
         // Handle file or alias selection
         let filePath = match.text;
         if (match.id.includes(':')) {
-            const [, path] = match.id.split(':');
-            filePath = path;
+            filePath = getAliasTarget(match.id) || filePath;
         }
 
         const file = this.app.vault.getAbstractFileByPath(filePath);

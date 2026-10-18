@@ -6,7 +6,7 @@
  */
 
 import {
-    Instruction, Notice, setIcon, TFile, Menu,
+    Instruction, Notice, TFile, Menu, parseFrontMatterTags,
 } from 'obsidian';
 import {
     generateHotKeyText,
@@ -20,6 +20,13 @@ import { ActionType } from '../utils/constants';
 import { HybridSearchService } from '../search/hybrid/hybrid-search-service';
 import { HybridSearchResult } from '../search/hybrid/types';
 import { logger } from '../utils/logger';
+import { SuggestionNotePart, SuggestionRowFlair, SuggestionRowOptions } from '../ui/suggestion-row';
+import { buildFileRow } from '../ui/file-row';
+import {
+    formatDate, formatFileTitle, formatTags, getQueryTerms, toSingleLine,
+} from '../ui/suggestion-format';
+import { PromptStatus } from '../ui/prompt-chrome';
+import { getSemanticStatus } from '../ui/semantic-status';
 
 /**
  * Extended match type for hybrid search results with extra metadata
@@ -32,7 +39,7 @@ interface HybridMatch extends Match {
  * Adapter for hybrid search mode in the command palette
  */
 export default class HybridSearchAdapter extends SuggestModalAdapter {
-    titleText: string;
+    modeLabel = 'Hybrid';
 
     emptyStateText: string;
 
@@ -45,6 +52,9 @@ export default class HybridSearchAdapter extends SuggestModalAdapter {
     private hybridSearchPrefix: string;
 
     private lastSearchResults: HybridMatch[] = [];
+
+    /** True while the cross-encoder reranks the first-pass results */
+    private isRefining = false;
 
     /** Debounce applied by the palette before searching (semantic search is expensive) */
     private readonly SEARCH_DEBOUNCE_MS = 150;
@@ -66,8 +76,7 @@ export default class HybridSearchAdapter extends SuggestModalAdapter {
     initialize(): void {
         super.initialize();
 
-        this.titleText = 'Better Command Palette: Hybrid Search';
-        this.emptyStateText = 'Search for concepts, keywords, or topics...';
+        this.emptyStateText = 'No matching notes.';
         this.hybridSearchPrefix = '?'; // Use ? prefix for hybrid search
 
         this.hiddenIds = this.plugin.settings.hiddenFiles;
@@ -230,6 +239,8 @@ export default class HybridSearchAdapter extends SuggestModalAdapter {
                     if (options.signal?.aborted) return;
 
                     this.lastSearchResults = results.map((result) => this.toHybridMatch(result));
+                    // 'fused' is the first-pass order shown while the cross-encoder reranks
+                    this.setRefining(phase === 'fused');
 
                     // Emit results; done=true only when phase is 'complete'
                     options.onUpdate(this.lastSearchResults, phase === 'complete');
@@ -241,172 +252,121 @@ export default class HybridSearchAdapter extends SuggestModalAdapter {
             }
             logger.error('HybridSearchAdapter: Stream search failed', error);
             options.onUpdate([], true);
+        } finally {
+            if (!options.signal?.aborted) {
+                this.setRefining(false);
+            }
         }
     }
 
     /**
-     * Render a hybrid search result with match indicators
+     * Describe a hybrid row: file title with query highlights, note line with
+     * folder, date and excerpt, score at the right and a hover-only actions menu.
      */
-    renderSuggestion(match: Match, content: HTMLElement, _aux?: HTMLElement): void {
-        const hybridMatch = match as HybridMatch;
-        const result = hybridMatch.hybridResult;
+    getSuggestionRow(match: Match): SuggestionRowOptions {
+        const result = (match as HybridMatch).hybridResult;
+        const { settings } = this.plugin;
+        const queryTerms = getQueryTerms(this.cleanQuery(this.palette.inputEl?.value ?? ''));
 
-        // Clear default styling
-        content.addClass('hybrid-suggestion-content');
+        const actionsFlair: SuggestionRowFlair = {
+            icon: 'more-horizontal',
+            label: 'More options',
+            kind: 'menu',
+            onClick: (event) => this.openActionsMenu(match, event),
+        };
 
-        const file = this.app.vault.getAbstractFileByPath(match.id);
-
-        // --- ROW 1: Title & Meta ---
-        const headerEl = content.createEl('div', { cls: 'hybrid-result-header' });
-
-        // Title (Left)
-        // Always extract basename for the "Clean" layout, ignoring 'displayOnlyNotesNames' setting 
-        // because we have a dedicated path row now.
-        let displayName = match.text.split('/').pop() || match.text;
-
-        if (this.plugin.settings.hideMdExtension && displayName.endsWith('.md')) {
-            displayName = displayName.slice(0, -3);
+        if (!result) {
+            // Recent files (empty query): same as file rows; the palette adds the recent label
+            const file = this.app.vault.getAbstractFileByPath(match.id);
+            const tags = file instanceof TFile ? this.getFileTags(file) : match.tags;
+            return {
+                ...buildFileRow({ path: match.id, settings, tags }),
+                flair: actionsFlair,
+            };
         }
 
-        // Capitalize first letter
-        if (displayName.length > 0) {
-            displayName = displayName.charAt(0).toUpperCase() + displayName.slice(1);
+        const excerpt = toSingleLine(result.excerpt);
+        const details: SuggestionNotePart[] = [formatDate(result.lastModified || result.file?.stat?.mtime)];
+        if (excerpt) {
+            details.push({ text: excerpt, highlights: getQueryTerms((result.matches?.keywordMatches || []).join(' ')) });
+        } else {
+            details.push(formatTags(match.tags));
         }
 
-        headerEl.createEl('span', {
-            cls: 'hybrid-result-title',
-            text: displayName,
-        });
+        return {
+            ...buildFileRow({
+                path: match.id,
+                settings,
+                highlights: queryTerms,
+                details,
+            }),
+            // No percentage: after reranking, rows are ordered by fused rank, so a
+            // per-row score would read out of order. The order is the signal.
+            flair: actionsFlair,
+        };
+    }
 
-        // Spacer
-        headerEl.createEl('span', { cls: 'hybrid-header-spacer' });
+    private getFileTags(file: TFile): string[] {
+        const cache = this.app.metadataCache.getFileCache(file);
+        if (!cache) return [];
+        const inline = (cache.tags || []).map((tag) => tag.tag);
+        return inline.concat(parseFrontMatterTags(cache.frontmatter) || []);
+    }
 
-        // Meta (Right)
-        const metaEl = headerEl.createEl('span', { cls: 'hybrid-result-meta' });
+    /**
+     * Existing actions menu: vote on the result and hide/unhide it.
+     */
+    private openActionsMenu(match: Match, event: MouseEvent): void {
+        const result = (match as HybridMatch).hybridResult;
+        const displayName = formatFileTitle(match.id, this.plugin.settings).title;
+        const menu = new Menu();
 
-        // Rating Star
-        if (file instanceof TFile) {
-            const metadata = this.app.metadataCache.getFileCache(file);
-            const ratingRaw = metadata?.frontmatter?.rating;
-
-            if (ratingRaw !== undefined && ratingRaw !== null) {
-                const ratingNum = parseFloat(String(ratingRaw));
-                if (!isNaN(ratingNum)) {
-                    // Normalize from scale of 7 to scale of 5
-                    // e.g. 6/7 -> 4.28
-                    const normalized = (ratingNum / 7) * 5;
-                    const displayRating = normalized.toFixed(1); // e.g. "4.8"
-
-                    const ratingContainer = metaEl.createEl('span', { cls: 'hybrid-rating' });
-
-                    // Stars: 5 stars, filled if index < round(normalized) or similar logic
-                    // User requested "stars show correctly". Let's use simple rounding for filled stars.
-                    const rounded = Math.round(normalized);
-                    let starsStr = '';
-                    for (let i = 0; i < 5; i++) {
-                        starsStr += i < rounded ? '★' : '☆';
-                    }
-
-                    ratingContainer.createEl('span', { cls: 'hybrid-rating-stars', text: starsStr });
-                    ratingContainer.createEl('span', { cls: 'hybrid-rating-text', text: ` Rating: ${displayRating}/5` });
-                }
-            }
-        }
-
-        if (result) {
-            // Confidence Score
-            this.addConfidenceMeter(metaEl, result.finalScore);
-        }
-
-        // More Options Icon (Vertical dots)
-        const menuIcon = metaEl.createEl('span', { cls: 'hybrid-menu-icon' });
-        setIcon(menuIcon, 'more-vertical');
-
-        menuIcon.onClickEvent((event: MouseEvent) => {
-            event.preventDefault();
-            event.stopPropagation();
-
-            const menu = new Menu();
-
-            if (result && this.hybridSearchService) {
-                menu.addItem((item) => {
-                    item
-                        .setTitle('Upvote result')
-                        .setIcon('thumbs-up')
-                        .onClick(() => {
-                            this.recordResultFeedback(match.id, displayName, 1);
-                        });
-                });
-
-                menu.addItem((item) => {
-                    item
-                        .setTitle('Downvote result')
-                        .setIcon('thumbs-down')
-                        .onClick(() => {
-                            this.recordResultFeedback(match.id, displayName, -1);
-                        });
-                });
-
-                menu.addSeparator();
-            }
-
-            // Toggle Ignore/Hide
-            const isHidden = this.hiddenIds.includes(match.id);
+        if (result && this.hybridSearchService) {
             menu.addItem((item) => {
                 item
-                    .setTitle(isHidden ? 'Unhide Item' : 'Ignore Item')
-                    .setIcon(isHidden ? 'eye' : 'eye-off')
+                    .setTitle('Upvote result')
+                    .setIcon('thumbs-up')
                     .onClick(() => {
-                        this.toggleHideId(match.id);
-                        // Force update to reflect change immediately if needed, 
-                        // though toggleHideId usually triggers update.
+                        this.recordResultFeedback(match.id, displayName, 1);
                     });
             });
 
-            menu.showAtMouseEvent(event);
+            menu.addItem((item) => {
+                item
+                    .setTitle('Downvote result')
+                    .setIcon('thumbs-down')
+                    .onClick(() => {
+                        this.recordResultFeedback(match.id, displayName, -1);
+                    });
+            });
+
+            menu.addSeparator();
+        }
+
+        const isHidden = this.hiddenIds.includes(match.id);
+        menu.addItem((item) => {
+            item
+                .setTitle(isHidden ? 'Unhide item' : 'Ignore item')
+                .setIcon(isHidden ? 'eye' : 'eye-off')
+                .onClick(() => {
+                    this.toggleHideId(match.id);
+                });
         });
 
-        // --- ROW 2: Path ---
-        const fullPath = match.text;
-        const lastSlashIndex = fullPath.lastIndexOf('/');
-        if (lastSlashIndex > 0) {
-            const folderPath = fullPath.substring(0, lastSlashIndex);
-            const formattedPath = folderPath.replace(/\//g, ' > ');
+        menu.showAtMouseEvent(event);
+    }
 
-            content.createEl('div', {
-                cls: 'hybrid-result-path',
-                text: formattedPath
-            });
+    getStatus(): PromptStatus | null {
+        if (this.isRefining) {
+            return { text: 'Refining…' };
         }
+        return getSemanticStatus(this.plugin);
+    }
 
-        // --- ROW 3: Context (Date Pill + Snippet) ---
-        const bodyEl = content.createEl('div', { cls: 'hybrid-result-body' });
-
-        // Date Pill
-        const dateText = file instanceof TFile ? window.moment(file.stat.mtime).format('MMM D, YYYY') : '';
-
-        if (dateText) {
-            bodyEl.createEl('span', {
-                cls: 'hybrid-date-pill',
-                text: dateText
-            });
-        }
-
-        // Excerpt / Snippet
-        if (result?.excerpt) {
-            const excerptEl = bodyEl.createEl('span', {
-                cls: 'hybrid-excerpt',
-            });
-            // highlight keywords
-            this.renderExcerptWithHighlights(excerptEl, result.excerpt, result.matches?.keywordMatches || []);
-            // Add "..See more" suffix
-            excerptEl.createEl('span', { cls: 'hybrid-excerpt-more', text: '..See more' });
-        } else if (match.tags && match.tags.length > 0) {
-            // Fallback to tags if no excerpt
-            match.tags.slice(0, 3).forEach((tag) => {
-                bodyEl.createEl('span', { cls: 'hybrid-tag', text: tag.startsWith('#') ? tag : `#${tag}` });
-            });
-        }
+    private setRefining(refining: boolean): void {
+        if (this.isRefining === refining) return;
+        this.isRefining = refining;
+        this.palette.refreshStatus();
     }
 
     private recordResultFeedback(path: string, displayName: string, vote: 1 | -1): void {
@@ -426,48 +386,6 @@ export default class HybridSearchAdapter extends SuggestModalAdapter {
 
         const direction = vote > 0 ? 'more' : 'less';
         new Notice(`Marked "${displayName}" as ${direction} relevant for this search.`);
-    }
-
-    /**
-     * Render excerpt with keyword highlights
-     */
-    private renderExcerptWithHighlights(container: HTMLElement, text: string, keywords: string[]) {
-        if (!keywords.length) {
-            container.textContent = text;
-            return;
-        }
-
-        // Simple case-insensitive highlight
-        // Note: This is a basic implementation. For production, efficient regex construction is better.
-        const regex = new RegExp(`(${keywords.map(k => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})`, 'gi');
-        const parts = text.split(regex);
-
-        parts.forEach(part => {
-            if (keywords.some(k => k.toLowerCase() === part.toLowerCase())) {
-                container.createEl('span', { cls: 'hybrid-highlight', text: part });
-            } else {
-                container.appendText(part);
-            }
-        });
-    }
-
-    /**
-     * Add confidence meter
-     */
-    private addConfidenceMeter(container: HTMLElement, score: number) {
-        // Score is 0-1
-        const meter = container.createEl('span', { cls: 'hybrid-confidence-meter' });
-        meter.title = `Relevance Score: ${(score * 100).toFixed(1)}%`;
-
-        // 5 bars
-        const bars = 5;
-        const filled = Math.round(score * bars);
-
-        for (let i = 0; i < bars; i++) {
-            meter.createEl('span', {
-                cls: `meter-bar ${i < filled ? 'filled' : 'empty'}`
-            });
-        }
     }
 
     /**

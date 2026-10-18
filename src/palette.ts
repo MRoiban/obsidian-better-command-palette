@@ -1,7 +1,8 @@
-import { App, setIcon, SuggestModal } from 'obsidian';
+import { App, SuggestModal } from 'obsidian';
 import {
     generateHotKeyText,
-    OrderedSet, PaletteMatch, renderPrevItems, SuggestModalAdapter,
+    getRecentLabel,
+    OrderedSet, PaletteMatch, SuggestModalAdapter,
 } from 'src/utils';
 import {
     Match,
@@ -22,6 +23,13 @@ import { HybridSearchService } from 'src/search/hybrid/hybrid-search-service';
 import { FileMatchCacheService } from 'src/search/file-match-cache-service';
 import { ActionType } from './utils/constants';
 import { logger } from './utils/logger';
+import { renderSuggestionRow } from './ui/suggestion-row';
+import { installRenderHook, PromptChrome } from './ui/prompt-chrome';
+import { isSameStatus } from './ui/semantic-status';
+import type { PromptStatus } from './ui/prompt-chrome';
+
+/** How often the status line is refreshed while it may change (indexing, model loading) */
+const STATUS_POLL_MS = 1000;
 
 /**
  * Obsidian's chooser exposes the rendered values and the selected index at runtime,
@@ -60,9 +68,12 @@ class BetterCommandPaletteModal extends SuggestModal<Match> implements UnsafeSug
 
     lastQuery!: string;
 
-    modalTitleEl!: HTMLElement;
+    /** Mode label, status line and hidden-items toggle */
+    chrome!: PromptChrome;
 
-    hiddenItemsHeaderEl!: HTMLElement;
+    private currentStatus: PromptStatus | null = null;
+
+    private statusPollTimer: number | null = null;
 
     showHiddenItems!: boolean;
 
@@ -134,9 +145,6 @@ class BetterCommandPaletteModal extends SuggestModal<Match> implements UnsafeSug
 
         this.modalEl.addClass('better-command-palette');
 
-        // The only time the input will be empty will be when we are searching commands
-        this.setPlaceholder('Select a command');
-
         // Set up all of our different adapters
         this.commandAdapter = new BetterCommandPaletteCommandAdapter(
             app,
@@ -175,28 +183,18 @@ class BetterCommandPaletteModal extends SuggestModal<Match> implements UnsafeSug
         // The message handler is attached in onOpen because close() detaches it.
         this.suggestionsWorker = suggestionsWorker;
 
-        // Add our custom title element
-        this.modalTitleEl = createEl('p', {
-            cls: 'better-command-palette-title',
-        });
+        // Mode label in the input row, status line and hidden toggle in the results
+        this.showHiddenItems = false;
+        this.chrome = new PromptChrome(this, this.toggleHiddenItems);
+        installRenderHook(this, () => this.afterRender());
 
         // If we have an initial input value, we need to set it early so action type detection works
         if (this.initialInputValue) {
             this.inputEl.value = this.initialInputValue;
         }
 
-        // Update our action type before adding in our title element so the text is correct
+        // Set the action type so the mode label, placeholder and empty state are correct
         this.updateActionType();
-
-        // Add in the title element
-        this.modalEl.insertBefore(this.modalTitleEl, this.modalEl.firstChild);
-
-        this.hiddenItemsHeaderEl = createEl('p', 'hidden-items-header');
-        this.showHiddenItems = false;
-
-        this.hiddenItemsHeaderEl.onClickEvent(this.toggleHiddenItems);
-
-        this.modalEl.insertBefore(this.hiddenItemsHeaderEl, this.resultContainerEl);
 
         // Set our scopes for the modal
         this.setScopes(plugin);
@@ -218,6 +216,7 @@ class BetterCommandPaletteModal extends SuggestModal<Match> implements UnsafeSug
         }
 
         this.cancelPendingSearch();
+        this.stopStatusPolling();
 
         // Only detach our own handler; another palette instance may own the worker now
         if (this.suggestionsWorker.onmessage === this.handleWorkerMessage) {
@@ -281,6 +280,33 @@ class BetterCommandPaletteModal extends SuggestModal<Match> implements UnsafeSug
         this.updateSuggestions();
     };
 
+    /** Runs after every render: refresh the status line and re-attach the chrome. */
+    private afterRender(): void {
+        this.refreshStatus();
+        this.chrome.attach();
+    }
+
+    /** Re-read the current adapter's status (indexing, model loading, reranking). */
+    refreshStatus(): void {
+        const status = this.currentAdapter?.getStatus() ?? null;
+        if (!isSameStatus(status, this.currentStatus)) {
+            this.currentStatus = status;
+            this.chrome.setStatus(status);
+        }
+    }
+
+    private startStatusPolling(): void {
+        this.stopStatusPolling();
+        this.statusPollTimer = window.setInterval(() => this.refreshStatus(), STATUS_POLL_MS);
+    }
+
+    private stopStatusPolling(): void {
+        if (this.statusPollTimer !== null) {
+            window.clearInterval(this.statusPollTimer);
+            this.statusPollTimer = null;
+        }
+    }
+
     private getSelectedMatch(): Match | null {
         const chooser = this.chooser as SelectableChooser;
         const index = chooser.selectedItem ?? -1;
@@ -296,6 +322,7 @@ class BetterCommandPaletteModal extends SuggestModal<Match> implements UnsafeSug
         this.suggestionsWorker.onmessage = this.handleWorkerMessage;
 
         super.onOpen();
+        this.startStatusPolling();
 
         // Record modal open for pogo-sticking detection
         if (this.plugin.usageTracker) {
@@ -428,8 +455,10 @@ class BetterCommandPaletteModal extends SuggestModal<Match> implements UnsafeSug
 
         if (wasUpdated) {
             this.updateEmptyStateText();
-            this.updateTitleText();
+            this.updateModeLabel();
+            this.updatePlaceholder();
             this.updateInstructions();
+            this.refreshStatus();
             this.setCurrentSuggestions(this.currentAdapter
                 .getSortedItems()
                 .slice(0, this.getResultLimit()));
@@ -438,11 +467,21 @@ class BetterCommandPaletteModal extends SuggestModal<Match> implements UnsafeSug
         return wasUpdated;
     }
 
-    updateTitleText() {
-        if (this.plugin.settings.showPluginName) {
-            this.modalTitleEl.setText(this.currentAdapter.getTitleText());
-        } else {
-            this.modalTitleEl.setText('');
+    updateModeLabel() {
+        this.chrome.setModeLabel(this.currentAdapter.getModeLabel());
+    }
+
+    /** Mode-specific placeholder; the prefix is already in the input for other modes */
+    updatePlaceholder() {
+        this.setPlaceholder(BetterCommandPaletteModal.getPlaceholder(this.actionType));
+    }
+
+    private static getPlaceholder(type: ActionType): string {
+        switch (type) {
+            case ActionType.Hybrid: return 'Search for concepts, keywords, or topics…';
+            case ActionType.Files: return 'Find a file…';
+            case ActionType.Tags: return 'Find a tag…';
+            default: return 'Select a command…';
         }
     }
 
@@ -459,7 +498,7 @@ class BetterCommandPaletteModal extends SuggestModal<Match> implements UnsafeSug
         this.setInstructions([
             ...this.currentAdapter.getInstructions(),
             { command: generateHotKeyText({ modifiers: [], key: 'ESC' }, this.plugin.settings), purpose: 'Close palette' },
-            { command: generateHotKeyText({ modifiers: ['Mod'], key: 'I' }, this.plugin.settings), purpose: 'Toggle Hidden Items' },
+            { command: generateHotKeyText({ modifiers: ['Mod'], key: 'I' }, this.plugin.settings), purpose: 'Toggle hidden items' },
         ]);
     }
 
@@ -765,54 +804,33 @@ class BetterCommandPaletteModal extends SuggestModal<Match> implements UnsafeSug
 
         const hiddenItemCount = this.currentSuggestions.length - visibleItems.length;
 
-        this.updateHiddenItemCountHeader(hiddenItemCount);
+        this.updateHiddenItemsToggle(hiddenItemCount);
 
         return this.showHiddenItems ? this.currentSuggestions : visibleItems;
     }
 
-    updateHiddenItemCountHeader(hiddenItemCount: number) {
-        this.hiddenItemsHeaderEl.empty();
-
-        if (hiddenItemCount !== 0) {
-            const text = `${this.showHiddenItems ? 'Hide' : 'Show'} hidden items (${hiddenItemCount})`;
-            this.hiddenItemsHeaderEl.setText(text);
-        }
+    updateHiddenItemsToggle(hiddenItemCount: number) {
+        const text = hiddenItemCount !== 0
+            ? `${this.showHiddenItems ? 'Hide' : 'Show'} hidden items (${hiddenItemCount})`
+            : '';
+        this.chrome.setHiddenToggleText(text);
     }
 
     renderSuggestion(match: Match, el: HTMLElement) {
-        el.addClass('mod-complex');
+        const adapter = this.currentAdapter;
+        const isHidden = adapter.hiddenIds.includes(match.id);
+        const row = adapter.getSuggestionRow(match);
 
-        const isHidden = this.currentAdapter.hiddenIds.includes(match.id);
-
-        if (isHidden) {
-            el.addClass('hidden');
-        }
-
-        const icon = 'cross';
-
-        const suggestionContent = el.createEl('span', 'suggestion-content');
-        const suggestionAux = el.createEl('span', 'suggestion-aux');
-
-        const flairContainer = suggestionAux.createEl('span', 'suggestion-flair');
-        renderPrevItems(this.plugin.settings, match, suggestionContent, this.currentAdapter.getPrevItems());
-
-        setIcon(flairContainer, icon);
-        flairContainer.ariaLabel = isHidden ? 'Click to Unhide' : 'Click to Hide';
-        flairContainer.setAttr('data-id', match.id);
-
-        flairContainer.onClickEvent((event) => {
-            event.preventDefault();
-            event.stopPropagation();
-
-            const hideEl = event.target as HTMLElement;
-            const dataId = hideEl.getAttr('data-id');
-
-            if (dataId) {
-                this.currentAdapter.toggleHideId(dataId);
-            }
+        renderSuggestionRow(el, {
+            ...row,
+            auxText: row.auxText ?? getRecentLabel(this.plugin.settings, match, adapter.getPrevItems()),
+            flair: row.flair !== undefined ? row.flair : {
+                icon: isHidden ? 'eye' : 'x',
+                label: isHidden ? 'Unhide' : 'Hide',
+                onClick: () => adapter.toggleHideId(match.id),
+            },
+            hidden: isHidden,
         });
-
-        this.currentAdapter.renderSuggestion(match, suggestionContent, suggestionAux);
     }
 
     async onChooseSuggestion(item: Match, event: MouseEvent | KeyboardEvent) {

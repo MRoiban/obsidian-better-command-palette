@@ -10,6 +10,7 @@ import {
     BASIC_MODIFIER_ICONS, HYPER_KEY_MODIFIERS_SET, MAC_MODIFIER_ICONS, SPECIAL_KEYS,
 } from './constants';
 import { logger } from './logger';
+import { formatRecentLabel } from '../ui/suggestion-format';
 
 /**
  * Determines if the modifiers of a hotkey could be a hyper key command.
@@ -57,14 +58,19 @@ export function generateHotKeyText(
     return hotKeyStrings.join(' ');
 }
 
-export function renderPrevItems(settings: BetterCommandPalettePluginSettings, match: Match, el: HTMLElement, prevItems: OrderedSet<Match>) {
-    if (prevItems.has(match)) {
-        el.addClass('recent');
-        el.createEl('span', {
-            cls: 'suggestion-note',
-            text: settings.recentlyUsedText,
-        });
+/**
+ * Recent label for a match shown at the right of its row, or undefined if the match
+ * isn't recent. One pair of surrounding parentheses is stripped from the stored text.
+ */
+export function getRecentLabel(
+    settings: BetterCommandPalettePluginSettings,
+    match: Match,
+    prevItems: OrderedSet<Match>,
+): string | undefined {
+    if (!prevItems.has(match)) {
+        return undefined;
     }
+    return formatRecentLabel(settings.recentlyUsedText) || undefined;
 }
 
 export function getCommandText(item: Command): string {

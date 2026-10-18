@@ -1,189 +1,223 @@
-import { App, Setting } from 'obsidian';
+import { App, SettingGroup } from 'obsidian';
 import BetterCommandPalettePlugin from 'src/main';
 import { BaseSettingsTab } from './base-tab';
+import { configureSlider, createWarning, describe } from '../utils/setting-helpers';
+
+type HybridSettings = BetterCommandPalettePlugin['settings']['hybridSearch'];
+type HybridWeightKey = {
+    [K in keyof HybridSettings]: HybridSettings[K] extends number ? K : never;
+}[keyof HybridSettings];
 
 export class HybridTab implements BaseSettingsTab {
     id = 'hybrid';
-    title = 'Hybrid';
-    icon = 'layers';
+    title = 'Hybrid search';
 
     display(containerEl: HTMLElement, app: App, plugin: BetterCommandPalettePlugin): void {
         // Own a root element so re-renders replace the tab content instead of appending to it
-        this.render(containerEl.createDiv(), app, plugin);
+        this.render(containerEl.createDiv({ cls: 'bcp-settings-section' }), app, plugin);
     }
 
     private render(containerEl: HTMLElement, app: App, plugin: BetterCommandPalettePlugin): void {
         containerEl.empty();
         const { settings } = plugin;
 
-        new Setting(containerEl)
-            .setName('Enable Hybrid Search')
-            .setDesc('Combine keyword and semantic search for Google-like results')
-            .addToggle((toggle) => toggle
-                .setValue(settings.hybridSearch.enabled)
-                .onChange(async (value) => {
-                    settings.hybridSearch.enabled = value;
-                    await plugin.saveSettings();
-                    this.render(containerEl, app, plugin);
-                }));
+        this.renderEnable(containerEl, app, plugin);
 
         if (!settings.hybridSearch.enabled) {
-            containerEl.createEl('div', { cls: 'settings-info', text: 'Enable hybrid search to access advanced configuration.' });
             return;
         }
 
-        if (!settings.semanticSearch.enableSemanticSearch) {
-            containerEl.createEl('div', { cls: 'settings-warning', text: '⚠️ Semantic search is not enabled. Hybrid search works best when Semantic Search is active.' });
-        }
+        this.renderFusion(containerEl, plugin);
+        this.renderReRanking(containerEl, plugin);
+        this.renderBehaviour(containerEl, plugin);
+        this.renderClustering(containerEl, plugin);
+    }
 
-        // --- Fusion Settings ---
-        containerEl.createEl('h3', { text: 'Fusion Settings' });
+    private renderEnable(containerEl: HTMLElement, app: App, plugin: BetterCommandPalettePlugin): void {
+        const { settings } = plugin;
+        const showSemanticWarning = settings.hybridSearch.enabled && !settings.semanticSearch.enableSemanticSearch;
 
-        new Setting(containerEl)
-            .setName('RRF K Parameter')
-            .setDesc('Balance between high-ranking and low-ranking items (default: 60)')
-            .addSlider((slider) => slider
-                .setLimits(1, 100, 1)
-                .setValue(settings.hybridSearch.rrfK)
-                .setDynamicTooltip()
-                .onChange((value) => {
-                    settings.hybridSearch.rrfK = value;
+        new SettingGroup(containerEl)
+            .setHeading('Hybrid search')
+            .addSetting((setting) => setting
+                .setName('Enable hybrid search')
+                .setDesc(describe((fragment) => {
+                    fragment.createDiv({
+                        text: settings.hybridSearch.enabled
+                            ? 'Combine keyword and semantic search for Google-like results.'
+                            : 'Combine keyword and semantic search for Google-like results. Turn this on to access advanced configuration.',
+                    });
+                    if (showSemanticWarning) {
+                        createWarning(fragment.createDiv(), 'Semantic search is not enabled. Hybrid search works best when semantic search is active.');
+                    }
+                }))
+                .addToggle((toggle) => toggle
+                    .setValue(settings.hybridSearch.enabled)
+                    .onChange(async (value) => {
+                        settings.hybridSearch.enabled = value;
+                        await plugin.saveSettings();
+                        this.render(containerEl, app, plugin);
+                    })));
+    }
+
+    private renderFusion(containerEl: HTMLElement, plugin: BetterCommandPalettePlugin): void {
+        const { hybridSearch } = plugin.settings;
+
+        new SettingGroup(containerEl)
+            .setHeading('Fusion')
+            .addSetting((setting) => configureSlider(setting, {
+                name: 'RRF K parameter',
+                desc: 'Balance between high-ranking and low-ranking items (default: 60).',
+                min: 1,
+                max: 100,
+                step: 1,
+                value: hybridSearch.rrfK,
+                onChange: (value) => {
+                    hybridSearch.rrfK = value;
                     plugin.scheduleSettingsSave();
-                }));
-
-        new Setting(containerEl)
-            .setName('Keyword Weight')
-            .setDesc('Importance of keyword matches (0-1)')
-            .addSlider((slider) => slider
-                .setLimits(0, 1, 0.1)
-                .setValue(settings.hybridSearch.keywordWeight)
-                .setDynamicTooltip()
-                .onChange((value) => {
-                    settings.hybridSearch.keywordWeight = value;
+                },
+            }))
+            .addSetting((setting) => configureSlider(setting, {
+                name: 'Keyword weight',
+                desc: 'Importance of keyword matches (0-1).',
+                min: 0,
+                max: 1,
+                step: 0.1,
+                value: hybridSearch.keywordWeight,
+                onChange: (value) => {
+                    hybridSearch.keywordWeight = value;
                     plugin.scheduleSettingsSave();
-                }));
-
-        new Setting(containerEl)
-            .setName('Semantic Weight')
-            .setDesc('Importance of semantic matches (0-1)')
-            .addSlider((slider) => slider
-                .setLimits(0, 1, 0.1)
-                .setValue(settings.hybridSearch.semanticWeight)
-                .setDynamicTooltip()
-                .onChange((value) => {
-                    settings.hybridSearch.semanticWeight = value;
+                },
+            }))
+            .addSetting((setting) => configureSlider(setting, {
+                name: 'Semantic weight',
+                desc: 'Importance of semantic matches (0-1).',
+                min: 0,
+                max: 1,
+                step: 0.1,
+                value: hybridSearch.semanticWeight,
+                onChange: (value) => {
+                    hybridSearch.semanticWeight = value;
                     plugin.scheduleSettingsSave();
-                }));
+                },
+            }));
+    }
 
-        // --- Re-ranking Settings ---
-        containerEl.createEl('h3', { text: 'Re-ranking' });
-
-        new Setting(containerEl)
-            .setName('Enable Re-ranking')
-            .setDesc('Apply smart scoring to refine top results')
-            .addToggle((toggle) => toggle
-                .setValue(settings.hybridSearch.enableReRanking)
-                .onChange(async (value) => {
-                    settings.hybridSearch.enableReRanking = value;
-                    await plugin.saveSettings();
-                }));
-
-        new Setting(containerEl)
-            .setName('Re-rank Pool Size')
-            .setDesc('How many results to re-rank (default: 15)')
-            .addSlider((slider) => slider
-                .setLimits(5, 50, 5)
-                .setValue(settings.hybridSearch.reRankPoolSize)
-                .setDynamicTooltip()
-                .onChange((value) => {
-                    settings.hybridSearch.reRankPoolSize = value;
+    /** Smart-scoring pass over the fused results (separate from the semantic cross-encoder reranker). */
+    private renderReRanking(containerEl: HTMLElement, plugin: BetterCommandPalettePlugin): void {
+        const { hybridSearch } = plugin.settings;
+        const group = new SettingGroup(containerEl)
+            .setHeading('Hybrid re-ranking')
+            .addSetting((setting) => setting
+                .setName('Enable re-ranking')
+                .setDesc('Apply smart scoring to refine top results.')
+                .addToggle((toggle) => toggle
+                    .setValue(hybridSearch.enableReRanking)
+                    .onChange(async (value) => {
+                        hybridSearch.enableReRanking = value;
+                        await plugin.saveSettings();
+                    })))
+            .addSetting((setting) => configureSlider(setting, {
+                name: 'Re-rank pool size',
+                desc: 'How many results to re-rank (default: 15).',
+                min: 5,
+                max: 50,
+                step: 5,
+                value: hybridSearch.reRankPoolSize,
+                onChange: (value) => {
+                    hybridSearch.reRankPoolSize = value;
                     plugin.scheduleSettingsSave();
-                }));
+                },
+            }));
 
-        // Re-ranking weights
-        const createWeightSetting = (name: string, desc: string, key: keyof typeof settings.hybridSearch) => {
-            new Setting(containerEl)
-                .setName(name)
-                .setDesc(desc)
-                .addSlider((slider) => slider
-                    .setLimits(0, 1, 0.1)
-                    // @ts-ignore
-                    .setValue(settings.hybridSearch[key] as number)
-                    .setDynamicTooltip()
-                    .onChange((value) => {
-                        // @ts-ignore
-                        settings.hybridSearch[key] = value;
-                        plugin.scheduleSettingsSave();
-                    }));
+        const addWeight = (name: string, desc: string, key: HybridWeightKey) => {
+            group.addSetting((setting) => configureSlider(setting, {
+                name,
+                desc,
+                min: 0,
+                max: 1,
+                step: 0.1,
+                value: hybridSearch[key],
+                onChange: (value) => {
+                    hybridSearch[key] = value;
+                    plugin.scheduleSettingsSave();
+                },
+            }));
         };
 
-        createWeightSetting('Title Match Weight', 'Boost title matches', 'reRankTitleWeight');
-        createWeightSetting('Recency Weight', 'Boost recently modified files', 'reRankRecencyWeight');
-        createWeightSetting('Usage Weight', 'Boost frequently accessed files', 'reRankUsageWeight');
-        createWeightSetting('Link Importance Weight', 'Boost well-connected files (PageRank)', 'reRankPageRankWeight');
-        createWeightSetting('Content Density Weight', 'Boost files with more matching content', 'reRankContentWeight');
-        createWeightSetting('Term Proximity Weight', 'Boost files where terms appear close together', 'reRankProximityWeight');
+        addWeight('Title match weight', 'Boost title matches.', 'reRankTitleWeight');
+        addWeight('Recency weight', 'Boost recently modified files.', 'reRankRecencyWeight');
+        addWeight('Usage weight', 'Boost frequently accessed files.', 'reRankUsageWeight');
+        addWeight('Link importance weight', 'Boost well-connected files (PageRank).', 'reRankPageRankWeight');
+        addWeight('Content density weight', 'Boost files with more matching content.', 'reRankContentWeight');
+        addWeight('Term proximity weight', 'Boost files where terms appear close together.', 'reRankProximityWeight');
+    }
 
-        // --- Search Behavior ---
-        containerEl.createEl('h3', { text: 'Search Behavior' });
+    private renderBehaviour(containerEl: HTMLElement, plugin: BetterCommandPalettePlugin): void {
+        const { hybridSearch } = plugin.settings;
 
-        new Setting(containerEl)
-            .setName('Maximum Results')
-            .setDesc('Maximum number of search results to return')
-            .addSlider((slider) => slider
-                .setLimits(5, 50, 5)
-                .setValue(settings.hybridSearch.maxResults)
-                .setDynamicTooltip()
-                .onChange((value) => {
-                    settings.hybridSearch.maxResults = value;
+        new SettingGroup(containerEl)
+            .setHeading('Hybrid behaviour')
+            .addSetting((setting) => configureSlider(setting, {
+                name: 'Maximum results',
+                desc: 'Maximum number of search results to return.',
+                min: 5,
+                max: 50,
+                step: 5,
+                value: hybridSearch.maxResults,
+                onChange: (value) => {
+                    hybridSearch.maxResults = value;
                     plugin.scheduleSettingsSave();
-                }));
-
-        new Setting(containerEl)
-            .setName('Minimum Score Threshold')
-            .setDesc('Exclude results below this score (0-1)')
-            .addSlider((slider) => slider
-                .setLimits(0, 0.5, 0.05)
-                .setValue(settings.hybridSearch.minScoreThreshold)
-                .setDynamicTooltip()
-                .onChange((value) => {
-                    settings.hybridSearch.minScoreThreshold = value;
+                },
+            }))
+            .addSetting((setting) => configureSlider(setting, {
+                name: 'Minimum score threshold',
+                desc: 'Exclude results below this score (0-1).',
+                min: 0,
+                max: 0.5,
+                step: 0.05,
+                value: hybridSearch.minScoreThreshold,
+                onChange: (value) => {
+                    hybridSearch.minScoreThreshold = value;
                     plugin.scheduleSettingsSave();
-                }));
+                },
+            }))
+            .addSetting((setting) => setting
+                .setName('Show match reasons')
+                .setDesc('Display explanations for why results matched.')
+                .addToggle((toggle) => toggle
+                    .setValue(hybridSearch.showMatchReasons)
+                    .onChange(async (value) => {
+                        hybridSearch.showMatchReasons = value;
+                        await plugin.saveSettings();
+                    })));
+    }
 
-        new Setting(containerEl)
-            .setName('Show Match Reasons')
-            .setDesc('Display explanations for why results matched')
-            .addToggle((toggle) => toggle
-                .setValue(settings.hybridSearch.showMatchReasons)
-                .onChange(async (value) => {
-                    settings.hybridSearch.showMatchReasons = value;
-                    await plugin.saveSettings();
-                }));
+    private renderClustering(containerEl: HTMLElement, plugin: BetterCommandPalettePlugin): void {
+        const { hybridSearch } = plugin.settings;
 
-        // --- Clustering Settings ---
-        containerEl.createEl('h3', { text: 'Result Clustering' });
-
-        new Setting(containerEl)
-            .setName('Enable Result Clustering')
-            .setDesc('Group similar notes together in search results')
-            .addToggle((toggle) => toggle
-                .setValue(settings.hybridSearch.enableClustering)
-                .onChange(async (value) => {
-                    settings.hybridSearch.enableClustering = value;
-                    await plugin.saveSettings();
-                }));
-
-        new Setting(containerEl)
-            .setName('Cluster Similarity Threshold')
-            .setDesc('How similar notes must be to cluster (higher = stricter)')
-            .addSlider((slider) => slider
-                .setLimits(0.7, 0.95, 0.05)
-                .setValue(settings.hybridSearch.clusterSimilarityThreshold)
-                .setDynamicTooltip()
-                .onChange((value) => {
-                    settings.hybridSearch.clusterSimilarityThreshold = value;
+        new SettingGroup(containerEl)
+            .setHeading('Result clustering')
+            .addSetting((setting) => setting
+                .setName('Enable result clustering')
+                .setDesc('Group similar notes together in search results.')
+                .addToggle((toggle) => toggle
+                    .setValue(hybridSearch.enableClustering)
+                    .onChange(async (value) => {
+                        hybridSearch.enableClustering = value;
+                        await plugin.saveSettings();
+                    })))
+            .addSetting((setting) => configureSlider(setting, {
+                name: 'Cluster similarity threshold',
+                desc: 'How similar notes must be to cluster (higher = stricter).',
+                min: 0.7,
+                max: 0.95,
+                step: 0.05,
+                value: hybridSearch.clusterSimilarityThreshold,
+                onChange: (value) => {
+                    hybridSearch.clusterSimilarityThreshold = value;
                     plugin.scheduleSettingsSave();
-                }));
+                },
+            }));
     }
 }

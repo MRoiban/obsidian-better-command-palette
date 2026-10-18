@@ -1,232 +1,244 @@
-import { App, Setting, Notice } from 'obsidian';
+import { App, Notice, SettingGroup } from 'obsidian';
 import BetterCommandPalettePlugin from 'src/main';
 import { BaseSettingsTab } from './base-tab';
+import { configureSlider } from '../utils/setting-helpers';
+
+type ScoreWeightKey = keyof BetterCommandPalettePlugin['settings']['enhancedSearch']['scoreWeights'];
 
 export class SearchTab implements BaseSettingsTab {
     id = 'search';
     title = 'Search';
-    icon = 'search';
 
     display(containerEl: HTMLElement, app: App, plugin: BetterCommandPalettePlugin): void {
         // Own a root element so re-renders replace the tab content instead of appending to it
-        this.render(containerEl.createDiv(), app, plugin);
+        this.render(containerEl.createDiv({ cls: 'bcp-settings-section' }), app, plugin);
     }
 
     private render(containerEl: HTMLElement, app: App, plugin: BetterCommandPalettePlugin): void {
         containerEl.empty();
         const { settings } = plugin;
 
-        new Setting(containerEl)
-            .setName('Enable Enhanced Content Search')
-            .setDesc('Activate content indexing and smart scoring')
-            .addToggle((toggle) => toggle
-                .setValue(settings.enhancedSearch.enableContentSearch)
-                .onChange(async (value) => {
-                    settings.enhancedSearch.enableContentSearch = value;
-                    await plugin.saveSettings();
-                    this.render(containerEl, app, plugin);
-                }));
+        new SettingGroup(containerEl)
+            .setHeading('Search')
+            .addSetting((setting) => setting
+                .setName('Enable enhanced content search')
+                .setDesc('Activate content indexing and smart scoring.')
+                .addToggle((toggle) => toggle
+                    .setValue(settings.enhancedSearch.enableContentSearch)
+                    .onChange(async (value) => {
+                        settings.enhancedSearch.enableContentSearch = value;
+                        await plugin.saveSettings();
+                        this.render(containerEl, app, plugin);
+                    })));
 
         if (!settings.enhancedSearch.enableContentSearch) {
             return;
         }
 
-        // Scoring Weights
-        containerEl.createEl('h3', { text: 'Scoring Weights' });
+        this.renderScoringWeights(containerEl, plugin);
+        this.renderLinkGraph(containerEl, plugin);
+        this.renderMatching(containerEl, plugin);
+        this.renderPerformance(containerEl, plugin);
+    }
 
-        const createScoreSetting = (name: string, key: keyof typeof settings.enhancedSearch.scoreWeights) => {
-            new Setting(containerEl)
-                .setName(name)
-                .addSlider((slider) => slider
-                    .setLimits(0, 1, 0.05)
-                    .setValue(settings.enhancedSearch.scoreWeights[key] || 0)
-                    .setDynamicTooltip()
-                    .onChange((value) => {
-                        // @ts-ignore
-                        settings.enhancedSearch.scoreWeights[key] = value;
-                        plugin.scheduleSettingsSave();
-                    }));
+    private renderScoringWeights(containerEl: HTMLElement, plugin: BetterCommandPalettePlugin): void {
+        const { scoreWeights } = plugin.settings.enhancedSearch;
+        const group = new SettingGroup(containerEl).setHeading('Scoring weights');
+
+        const addWeight = (name: string, key: ScoreWeightKey) => {
+            group.addSetting((setting) => configureSlider(setting, {
+                name,
+                min: 0,
+                max: 1,
+                step: 0.05,
+                value: scoreWeights[key] || 0,
+                onChange: (value) => {
+                    scoreWeights[key] = value;
+                    plugin.scheduleSettingsSave();
+                },
+            }));
         };
 
-        createScoreSetting('Content Relevance', 'relevance');
-        createScoreSetting('Recency', 'recency');
-        createScoreSetting('Frequency', 'frequency');
-        createScoreSetting('Link Importance', 'linkImportance');
+        addWeight('Content relevance', 'relevance');
+        addWeight('Recency', 'recency');
+        addWeight('Frequency', 'frequency');
+        addWeight('Link importance', 'linkImportance');
+    }
 
-        // Link Graph Settings (NEW)
-        containerEl.createEl('h3', { text: 'Link Graph (PageRank)' });
+    private renderLinkGraph(containerEl: HTMLElement, plugin: BetterCommandPalettePlugin): void {
+        const { linkGraph } = plugin.settings;
 
-        new Setting(containerEl)
-            .setName('Enable Link Graph')
-            .setDesc('Compute page importance based on links')
-            .addToggle((toggle) => toggle
-                .setValue(settings.linkGraph.enabled)
-                .onChange(async (value) => {
-                    settings.linkGraph.enabled = value;
-                    await plugin.saveSettings();
-                }));
-
-        new Setting(containerEl)
-            .setName('Damping Factor')
-            .setDesc('Probability of continuing to follow links (0.85 is standard)')
-            .addSlider((slider) => slider
-                .setLimits(0.5, 0.99, 0.01)
-                .setValue(settings.linkGraph.dampingFactor)
-                .setDynamicTooltip()
-                .onChange((value) => {
-                    settings.linkGraph.dampingFactor = value;
+        new SettingGroup(containerEl)
+            .setHeading('Link graph')
+            .addSetting((setting) => setting
+                .setName('Enable link graph')
+                .setDesc('Compute page importance based on links (PageRank).')
+                .addToggle((toggle) => toggle
+                    .setValue(linkGraph.enabled)
+                    .onChange(async (value) => {
+                        linkGraph.enabled = value;
+                        await plugin.saveSettings();
+                    })))
+            .addSetting((setting) => configureSlider(setting, {
+                name: 'Damping factor',
+                desc: 'Probability of continuing to follow links (0.85 is standard).',
+                min: 0.5,
+                max: 0.99,
+                step: 0.01,
+                value: linkGraph.dampingFactor,
+                onChange: (value) => {
+                    linkGraph.dampingFactor = value;
                     plugin.scheduleSettingsSave();
-                }));
-
-        new Setting(containerEl)
-            .setName('Max Iterations')
-            .setDesc('Maximum number of calculation steps')
-            .addSlider((slider) => slider
-                .setLimits(10, 100, 5)
-                .setValue(settings.linkGraph.maxIterations)
-                .setDynamicTooltip()
-                .onChange((value) => {
-                    settings.linkGraph.maxIterations = value;
+                },
+            }))
+            .addSetting((setting) => configureSlider(setting, {
+                name: 'Max iterations',
+                desc: 'Maximum number of calculation steps.',
+                min: 10,
+                max: 100,
+                step: 5,
+                value: linkGraph.maxIterations,
+                onChange: (value) => {
+                    linkGraph.maxIterations = value;
                     plugin.scheduleSettingsSave();
-                }));
-
-        new Setting(containerEl)
-            .setName('Link Graph Weight')
-            .setDesc('Weight of link importance in final scoring (0-1)')
-            .addSlider((slider) => slider
-                .setLimits(0, 1, 0.05)
-                .setValue(settings.linkGraph.weight)
-                .setDynamicTooltip()
-                .onChange((value) => {
-                    settings.linkGraph.weight = value;
+                },
+            }))
+            .addSetting((setting) => configureSlider(setting, {
+                name: 'Link graph weight',
+                desc: 'Weight of link importance in final scoring (0-1).',
+                min: 0,
+                max: 1,
+                step: 0.05,
+                value: linkGraph.weight,
+                onChange: (value) => {
+                    linkGraph.weight = value;
                     plugin.scheduleSettingsSave();
-                }));
-
-        // Matching Settings
-        containerEl.createEl('h3', { text: 'Matching' });
-
-        new Setting(containerEl)
-            .setName('Typo Tolerance')
-            .setDesc('Fuzzy matching level (0 = exact, 1 = minor typos, 2 = more lenient)')
-            .addSlider((slider) => slider
-                .setLimits(0, 2, 1)
-                .setValue(settings.enhancedSearch.typoTolerance)
-                .setDynamicTooltip()
-                .onChange((value) => {
-                    settings.enhancedSearch.typoTolerance = value;
-                    plugin.scheduleSettingsSave();
-                }));
-
-        new Setting(containerEl)
-            .setName('Accent Folding')
-            .setDesc('Treat accented characters as equivalent (e.g., é = e)')
-            .addToggle((toggle) => toggle
-                .setValue(settings.enhancedSearch.foldAccents)
-                .onChange(async (value) => {
-                    settings.enhancedSearch.foldAccents = value;
-                    await plugin.saveSettings();
-                }));
-
-        new Setting(containerEl)
-            .setName('Enable Stemming')
-            .setDesc('Match word variations (e.g., running = run)')
-            .addToggle((toggle) => toggle
-                .setValue(settings.enhancedSearch.enableStemming)
-                .onChange(async (value) => {
-                    settings.enhancedSearch.enableStemming = value;
-                    await plugin.saveSettings();
-                }));
-
-        new Setting(containerEl)
-            .setName('Preserve Query')
-            .setDesc('Keep search query when switching between search modes')
-            .addToggle((toggle) => toggle
-                .setValue(settings.enhancedSearch.preserveQuery)
-                .onChange(async (value) => {
-                    settings.enhancedSearch.preserveQuery = value;
-                    await plugin.saveSettings();
-                }));
-
-        // Performance Settings
-        containerEl.createEl('h3', { text: 'Performance' });
-
-        new Setting(containerEl)
-            .setName('Enable Usage Tracking')
-            .setDesc('Track file access for smarter ranking')
-            .addToggle((toggle) => toggle
-                .setValue(settings.enhancedSearch.enableUsageTracking)
-                .onChange(async (value) => {
-                    settings.enhancedSearch.enableUsageTracking = value;
-                    await plugin.saveSettings();
-                }));
-
-        new Setting(containerEl)
-            .setName('Maximum Indexed Files')
-            .addSlider((slider) => slider
-                .setLimits(1000, 50000, 1000)
-                .setValue(settings.enhancedSearch.maxIndexedFiles)
-                .setDynamicTooltip()
-                .onChange((value) => {
-                    settings.enhancedSearch.maxIndexedFiles = value;
-                    plugin.scheduleSettingsSave();
-                }));
-
-        new Setting(containerEl)
-            .setName('Indexing Debounce (ms)')
-            .setDesc('Wait time after file changes before re-indexing')
-            .addSlider((slider) => slider
-                .setLimits(100, 5000, 100)
-                .setValue(settings.enhancedSearch.indexingDebounceMs)
-                .setDynamicTooltip()
-                .onChange((value) => {
-                    settings.enhancedSearch.indexingDebounceMs = value;
-                    plugin.scheduleSettingsSave();
-                }));
-
-        new Setting(containerEl)
-            .setName('Max File Size (KB)')
-            .setDesc('Skip indexing files larger than this (for performance)')
-            .addSlider((slider) => slider
-                .setLimits(128, 2048, 128)
-                .setValue(Math.round(settings.enhancedSearch.maxFileSize / 1024))
-                .setDynamicTooltip()
-                .onChange((value) => {
-                    settings.enhancedSearch.maxFileSize = value * 1024;
-                    plugin.scheduleSettingsSave();
-                }));
-
-        new Setting(containerEl)
-            .setName('Content Preview Length')
-            .setDesc('Length of content snippets in search results')
-            .addSlider((slider) => slider
-                .setLimits(50, 500, 50)
-                .setValue(settings.enhancedSearch.contentPreviewLength)
-                .setDynamicTooltip()
-                .onChange((value) => {
-                    settings.enhancedSearch.contentPreviewLength = value;
-                    plugin.scheduleSettingsSave();
-                }));
-
-        // Actions
-        containerEl.createEl('h3', { text: 'Actions' });
-
-        const btnSetting = new Setting(containerEl)
-            .setName('Maintenance')
-            .setDesc('Manage search index');
-
-        btnSetting.addButton((button) => button
-            .setButtonText('Rebuild Index')
-            .onClick(async () => {
-                new Notice('Rebuilding index...');
-                // TODO: Call actual rebuild
-                setTimeout(() => new Notice('Done'), 1000);
+                },
             }));
+    }
 
-        btnSetting.addButton((button) => button
-            .setButtonText('Clear Cache')
-            .setWarning()
-            .onClick(async () => {
-                new Notice('Cache cleared');
-            }));
+    private renderMatching(containerEl: HTMLElement, plugin: BetterCommandPalettePlugin): void {
+        const { enhancedSearch } = plugin.settings;
+
+        new SettingGroup(containerEl)
+            .setHeading('Matching')
+            .addSetting((setting) => configureSlider(setting, {
+                name: 'Typo tolerance',
+                desc: 'Fuzzy matching level (0 = exact, 1 = minor typos, 2 = more lenient).',
+                min: 0,
+                max: 2,
+                step: 1,
+                value: enhancedSearch.typoTolerance,
+                onChange: (value) => {
+                    enhancedSearch.typoTolerance = value;
+                    plugin.scheduleSettingsSave();
+                },
+            }))
+            .addSetting((setting) => setting
+                .setName('Accent folding')
+                .setDesc('Treat accented characters as equivalent (e.g., é = e).')
+                .addToggle((toggle) => toggle
+                    .setValue(enhancedSearch.foldAccents)
+                    .onChange(async (value) => {
+                        enhancedSearch.foldAccents = value;
+                        await plugin.saveSettings();
+                    })))
+            .addSetting((setting) => setting
+                .setName('Enable stemming')
+                .setDesc('Match word variations (e.g., running = run).')
+                .addToggle((toggle) => toggle
+                    .setValue(enhancedSearch.enableStemming)
+                    .onChange(async (value) => {
+                        enhancedSearch.enableStemming = value;
+                        await plugin.saveSettings();
+                    })))
+            .addSetting((setting) => setting
+                .setName('Preserve query')
+                .setDesc('Keep the search query when switching between search modes.')
+                .addToggle((toggle) => toggle
+                    .setValue(enhancedSearch.preserveQuery)
+                    .onChange(async (value) => {
+                        enhancedSearch.preserveQuery = value;
+                        await plugin.saveSettings();
+                    })));
+    }
+
+    private renderPerformance(containerEl: HTMLElement, plugin: BetterCommandPalettePlugin): void {
+        const { enhancedSearch } = plugin.settings;
+
+        new SettingGroup(containerEl)
+            .setHeading('Search performance')
+            .addSetting((setting) => setting
+                .setName('Enable usage tracking')
+                .setDesc('Track file access for smarter ranking.')
+                .addToggle((toggle) => toggle
+                    .setValue(enhancedSearch.enableUsageTracking)
+                    .onChange(async (value) => {
+                        enhancedSearch.enableUsageTracking = value;
+                        await plugin.saveSettings();
+                    })))
+            .addSetting((setting) => configureSlider(setting, {
+                name: 'Maximum indexed files',
+                min: 1000,
+                max: 50000,
+                step: 1000,
+                value: enhancedSearch.maxIndexedFiles,
+                onChange: (value) => {
+                    enhancedSearch.maxIndexedFiles = value;
+                    plugin.scheduleSettingsSave();
+                },
+            }))
+            .addSetting((setting) => configureSlider(setting, {
+                name: 'Indexing debounce (ms)',
+                desc: 'Wait time after file changes before re-indexing.',
+                min: 100,
+                max: 5000,
+                step: 100,
+                value: enhancedSearch.indexingDebounceMs,
+                onChange: (value) => {
+                    enhancedSearch.indexingDebounceMs = value;
+                    plugin.scheduleSettingsSave();
+                },
+            }))
+            .addSetting((setting) => configureSlider(setting, {
+                name: 'Max file size (KB)',
+                desc: 'Skip indexing files larger than this (for performance).',
+                min: 128,
+                max: 2048,
+                step: 128,
+                value: Math.round(enhancedSearch.maxFileSize / 1024),
+                onChange: (value) => {
+                    enhancedSearch.maxFileSize = value * 1024;
+                    plugin.scheduleSettingsSave();
+                },
+            }))
+            .addSetting((setting) => configureSlider(setting, {
+                name: 'Content preview length',
+                desc: 'Length of content snippets in search results.',
+                min: 50,
+                max: 500,
+                step: 50,
+                value: enhancedSearch.contentPreviewLength,
+                onChange: (value) => {
+                    enhancedSearch.contentPreviewLength = value;
+                    plugin.scheduleSettingsSave();
+                },
+            }))
+            .addSetting((setting) => setting
+                .setName('Maintenance')
+                .setDesc('Manage the search index.')
+                .addButton((button) => button
+                    .setButtonText('Rebuild index')
+                    .onClick(async () => {
+                        new Notice('Rebuilding index...');
+                        // TODO: Call actual rebuild
+                        setTimeout(() => new Notice('Done'), 1000);
+                    }))
+                .addButton((button) => button
+                    .setButtonText('Clear cache')
+                    .setWarning()
+                    .onClick(async () => {
+                        new Notice('Cache cleared');
+                    })));
     }
 }

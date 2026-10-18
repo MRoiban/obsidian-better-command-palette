@@ -6,9 +6,11 @@ import {
     from 'src/utils';
 import { ActionType, QUERY_TAG } from 'src/utils/constants';
 import { Match, UnsafeAppInterface, WorkerMode } from '../types/types';
+import { SuggestionRowOptions } from '../ui/suggestion-row';
+import { formatNoteCount, getQueryTerms } from '../ui/suggestion-format';
 
 export default class BetterCommandPaletteTagAdapter extends SuggestModalAdapter {
-    titleText: string;
+    modeLabel = 'Tags';
 
     emptyStateText: string;
 
@@ -30,7 +32,6 @@ export default class BetterCommandPaletteTagAdapter extends SuggestModalAdapter 
         this.hiddenIdsSettingsKey = 'hiddenTags';
 
         this.tagSearchPrefix = this.plugin.settings.tagSearchPrefix;
-        this.titleText = 'Better Command Palette: Tags';
         this.emptyStateText = 'No matching tags.';
 
         this.setItems(Object.entries(this.app.metadataCache.getTags())
@@ -47,8 +48,8 @@ export default class BetterCommandPaletteTagAdapter extends SuggestModalAdapter 
     getInstructions(): Instruction[] {
         return [
             { command: generateHotKeyText({ modifiers: [], key: 'ENTER' }, this.plugin.settings), purpose: 'See file usage' },
-            { command: generateHotKeyText({ modifiers: ['Mod'], key: this.plugin.settings.commandSearchHotkey }, this.plugin.settings), purpose: 'Search Commands' },
-            { command: generateHotKeyText({ modifiers: ['Mod'], key: this.plugin.settings.fileSearchHotkey }, this.plugin.settings), purpose: 'Search Files' },
+            { command: generateHotKeyText({ modifiers: ['Mod'], key: this.plugin.settings.commandSearchHotkey }, this.plugin.settings), purpose: 'Search commands' },
+            { command: generateHotKeyText({ modifiers: ['Mod'], key: this.plugin.settings.fileSearchHotkey }, this.plugin.settings), purpose: 'Search files' },
         ];
     }
 
@@ -58,19 +59,15 @@ export default class BetterCommandPaletteTagAdapter extends SuggestModalAdapter 
             : query;
     }
 
-    renderSuggestion(match: Match, content: HTMLElement, aux: HTMLElement): void {
-        content.createEl('span', {
-            cls: 'suggestion-content',
-            text: match.text,
-        });
+    getSuggestionRow(match: Match): SuggestionRowOptions {
+        const count = parseInt(match.tags[0] ?? '0', 10);
+        const query = this.cleanQuery(this.palette.inputEl.value.trim());
 
-        const count = parseInt(match.tags[0], 10);
-
-        // The palette already renders the hide toggle as .suggestion-flair in aux
-        aux.createEl('span', {
-            cls: 'suggestion-note tag-usage-count',
-            text: `Found in ${count} file${count === 1 ? '' : 's'}`,
-        });
+        return {
+            title: match.text,
+            highlights: getQueryTerms(query, 1),
+            auxText: formatNoteCount(count),
+        };
     }
 
     async onChooseSuggestion(match: Match | null) {

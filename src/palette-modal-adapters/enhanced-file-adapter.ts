@@ -1,6 +1,4 @@
-import {
-    Instruction, Notice, setIcon, TFile,
-} from 'obsidian';
+import { Instruction, Notice, TFile } from 'obsidian';
 import {
     generateHotKeyText,
     getOrCreateFile,
@@ -12,6 +10,9 @@ import { ActionType, QUERY_OR, QUERY_TAG } from '../utils/constants';
 import { EnhancedSearchService } from '../search/enhanced-search-service';
 import { FileMatchCacheService } from '../search/file-match-cache-service';
 import { logger } from '../utils/logger';
+import { SuggestionRowOptions } from '../ui/suggestion-row';
+import { buildAliasRow, buildFileRow, buildUnresolvedRow } from '../ui/file-row';
+import { getAliasTarget, getQueryTerms } from '../ui/suggestion-format';
 
 /** Queries shorter than this are served by the fuzzy worker instead of the index */
 const MIN_ENHANCED_QUERY_LENGTH = 2;
@@ -23,7 +24,7 @@ const SEARCH_DEBOUNCE_MS = 100;
  * Enhanced file adapter that uses the new search system
  */
 export default class EnhancedFileAdapter extends SuggestModalAdapter {
-    titleText: string;
+    modeLabel = 'Files';
 
     emptyStateText: string;
 
@@ -61,7 +62,6 @@ export default class EnhancedFileAdapter extends SuggestModalAdapter {
     initialize(): void {
         super.initialize();
 
-        this.titleText = 'Better Command Palette: Files (Enhanced)';
         this.emptyStateText = 'No matching files.';
         this.fileSearchPrefix = this.plugin.settings.fileSearchPrefix;
 
@@ -95,8 +95,8 @@ export default class EnhancedFileAdapter extends SuggestModalAdapter {
             { command: generateHotKeyText({ modifiers: [], key: 'ENTER' }, this.plugin.settings), purpose: 'Open file' },
             { command: generateHotKeyText({ modifiers: [openInNewTabMod], key: 'ENTER' }, this.plugin.settings), purpose: 'Open file in new pane' },
             { command: generateHotKeyText({ modifiers: [createNewFileMod], key: 'ENTER' }, this.plugin.settings), purpose: 'Create file' },
-            { command: generateHotKeyText({ modifiers: ['Mod'], key: this.plugin.settings.commandSearchHotkey }, this.plugin.settings), purpose: 'Search Commands' },
-            { command: generateHotKeyText({ modifiers: ['Mod'], key: this.plugin.settings.tagSearchHotkey }, this.plugin.settings), purpose: 'Search Tags' },
+            { command: generateHotKeyText({ modifiers: ['Mod'], key: this.plugin.settings.commandSearchHotkey }, this.plugin.settings), purpose: 'Search commands' },
+            { command: generateHotKeyText({ modifiers: ['Mod'], key: this.plugin.settings.tagSearchHotkey }, this.plugin.settings), purpose: 'Search tags' },
         ];
     }
 
@@ -216,168 +216,25 @@ export default class EnhancedFileAdapter extends SuggestModalAdapter {
         }
     }
 
-    renderSuggestion(match: Match, content: HTMLElement, _aux?: HTMLElement): void {
+    getSuggestionRow(match: Match): SuggestionRowOptions {
         this.syncFromCache();
-        // Always use the original file adapter rendering style
-        this.renderOriginalSuggestion(match, content);
-    }
+        const highlights = getQueryTerms(this.cleanQuery(this.palette.inputEl.value.trim()));
 
-    private renderOriginalSuggestion(match: Match, content: HTMLElement): void {
-        const filePath = this.getResolvedFilePath(match);
-        let noteName = match.id.includes(':') ? match.text : filePath;
-
-        // Build the displayed note name without its full path if required in settings
-        if (this.plugin.settings.displayOnlyNotesNames) {
-            noteName = match.text.split('/').pop() || match.text;
+        if (this.fileMatchCache?.isUnresolvedId(match.id)) {
+            return buildUnresolvedRow(match.text, highlights);
         }
 
-        // Build the displayed note name without its Markdown extension if required in settings
-        if (this.plugin.settings.hideMdExtension && noteName.endsWith('.md')) {
-            noteName = noteName.slice(0, -3);
+        const aliasTarget = match.id.includes(':') ? getAliasTarget(match.id) : null;
+        if (aliasTarget) {
+            return buildAliasRow(match.text, aliasTarget, this.plugin.settings, highlights);
         }
 
-        // Create main title container
-        const suggestionEl = content.createEl('div', {
-            cls: 'suggestion-title',
+        return buildFileRow({
+            path: this.getResolvedFilePath(match),
+            settings: this.plugin.settings,
+            tags: match.tags,
+            highlights,
         });
-
-        // Add file type indicator
-        this.addFileTypeIndicator(suggestionEl, filePath);
-
-        // Add recently accessed indicator if applicable
-        if (this.isRecentlyAccessed(match)) {
-            suggestionEl.createEl('div', { cls: 'recent-indicator' });
-        }
-
-        // Smart path rendering - show folder structure more intelligently
-        if (!this.plugin.settings.displayOnlyNotesNames && filePath.includes('/')) {
-            this.renderSmartPath(suggestionEl, filePath);
-        } else {
-            suggestionEl.createEl('span', {
-                cls: 'path-part filename',
-                text: noteName,
-            });
-        }
-
-        // Add unresolved styling if this is an unresolved link
-        if (this.fileMatchCache.isUnresolvedId(match.id)) {
-            suggestionEl.addClass('unresolved');
-        }
-
-        // Handle aliases
-        if (match.id.includes(':')) {
-            suggestionEl.createEl('span', {
-                cls: 'suggestion-name',
-                text: match.text,
-            }).ariaLabel = 'Alias';
-
-            setIcon(suggestionEl, 'right-arrow-with-tail');
-
-            const [, path] = match.id.split(':');
-            suggestionEl.createEl('span', {
-                cls: 'suggestion-note',
-                text: path || match.id,
-            });
-        }
-
-        // Enhanced tag rendering
-        if (match.tags && match.tags.length > 0) {
-            const tagsEl = content.createEl('div', {
-                cls: 'suggestion-note',
-            });
-
-            match.tags.forEach((tag) => {
-                if (tag.trim()) {
-                    tagsEl.createEl('span', {
-                        cls: 'tag',
-                        text: tag.startsWith('#') ? tag : `#${tag}`,
-                    });
-                }
-            });
-        }
-    }
-
-    /**
-     * Add file type indicator based on file extension
-     */
-    private addFileTypeIndicator(container: HTMLElement, filePath: string): void {
-        const extension = this.getFileExtension(filePath);
-        if (!extension) return;
-
-        let typeClass = 'md';
-        let typeText = 'MD';
-
-        switch (extension.toLowerCase()) {
-            case 'md':
-                typeClass = 'md';
-                typeText = 'MD';
-                break;
-            case 'txt':
-                typeClass = 'txt';
-                typeText = 'TXT';
-                break;
-            case 'pdf':
-                typeClass = 'pdf';
-                typeText = 'PDF';
-                break;
-            case 'png':
-            case 'jpg':
-            case 'jpeg':
-            case 'gif':
-            case 'svg':
-                typeClass = 'img';
-                typeText = 'IMG';
-                break;
-            default:
-                typeText = extension.toUpperCase().substring(0, 3);
-        }
-
-        container.createEl('span', {
-            cls: `file-type-indicator ${typeClass}`,
-            text: typeText,
-        });
-    }
-
-    /**
-     * Get file extension from path
-     */
-    private getFileExtension(path: string): string | null {
-        const match = path.match(/\.([^.]+)$/);
-        return match ? match[1] : null;
-    }
-
-    /**
-     * Smart path rendering that emphasizes filename while showing context
-     * Now relies on CSS text-overflow: ellipsis for clipping
-     */
-    private renderSmartPath(container: HTMLElement, fullPath: string): void {
-        const displayPath = this.plugin.settings.hideMdExtension && fullPath.endsWith('.md')
-            ? fullPath.slice(0, -3)
-            : fullPath;
-
-        // Append (don't overwrite) so the type badge and recent indicator survive;
-        // CSS on .path-part handles the ellipsis
-        container.createEl('span', {
-            cls: 'path-part full-path',
-            text: displayPath,
-        });
-
-        // Always set the full path as tooltip
-        container.title = fullPath;
-    }
-
-    /**
-     * Check if file was recently accessed
-     */
-    private isRecentlyAccessed(match: Match): boolean {
-        if (!this.searchService) return false;
-
-        const lastOpened = this.searchService.getLastOpened?.(this.getResolvedFilePath(match));
-        if (!lastOpened) return false;
-
-        // Consider files accessed in the last 24 hours as recent
-        const daysSince = (Date.now() - lastOpened) / (1000 * 60 * 60 * 24);
-        return daysSince < 1;
     }
 
     async onChooseSuggestion(match: Match | null, event?: MouseEvent | KeyboardEvent): Promise<void> {
@@ -522,7 +379,6 @@ export default class EnhancedFileAdapter extends SuggestModalAdapter {
             return match.id;
         }
 
-        const [, path] = match.id.split(':');
-        return path || match.id;
+        return getAliasTarget(match.id) || match.id;
     }
 }

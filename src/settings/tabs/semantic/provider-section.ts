@@ -7,7 +7,7 @@
  * embedding fingerprint changes) without a restart.
  */
 
-import { Notice, Setting } from 'obsidian';
+import { Notice, SettingGroup } from 'obsidian';
 import BetterCommandPalettePlugin from 'src/main';
 import {
     CUSTOM_LOCAL_MODEL_ID, DEFAULT_LOCAL_MODEL_ID, LOCAL_DTYPE_LABELS, LOCAL_MODELS, LocalDeviceSetting, LocalDtype,
@@ -17,6 +17,7 @@ import {
 import type { EmbeddingProviderId } from 'src/search/semantic/providers/types';
 import { DEFAULT_EMBEDDING_MODEL } from 'src/search/semantic/embedding-fingerprint';
 import { SemanticSearchSettings } from 'src/search/semantic/types';
+import { createStatus, describe } from '../../utils/setting-helpers';
 
 const PROVIDER_LABELS: Record<EmbeddingProviderId, string> = {
     local: 'Local (in Obsidian)',
@@ -30,12 +31,6 @@ const DEVICE_LABELS: Record<LocalDeviceSetting, string> = {
 };
 
 const HF_ID_HINT = 'Expected "owner/model", e.g. Xenova/bge-base-en-v1.5. The repository needs ONNX weights in an "onnx/" folder.';
-
-function describe(build: (fragment: DocumentFragment) => void): DocumentFragment {
-    const fragment = document.createDocumentFragment();
-    build(fragment);
-    return fragment;
-}
 
 export class EmbeddingProviderSection {
     /**
@@ -62,9 +57,9 @@ export class EmbeddingProviderSection {
     render(containerEl: HTMLElement): void {
         const provider: EmbeddingProviderId = this.settings.embeddingProvider === 'ollama' ? 'ollama' : 'local';
 
-        new Setting(containerEl).setName('Embeddings').setHeading();
+        const group = new SettingGroup(containerEl).setHeading('Embeddings');
 
-        new Setting(containerEl)
+        group.addSetting((setting) => setting
             .setName('Embedding provider')
             .setDesc(provider === 'local'
                 ? 'Runs the embedding model inside Obsidian. The model is downloaded once from Hugging Face and cached; no external server needed.'
@@ -80,18 +75,18 @@ export class EmbeddingProviderSection {
                         this.pendingCustomModel = false;
                         await this.saveAndRerender();
                     });
-            });
+            }));
 
         if (provider === 'local') {
-            this.renderLocal(containerEl);
+            this.renderLocal(group);
         } else {
-            this.renderOllama(containerEl);
+            this.renderOllama(group);
         }
     }
 
     // --- Local provider ---
 
-    private renderLocal(containerEl: HTMLElement): void {
+    private renderLocal(group: SettingGroup): void {
         const { settings } = this;
         const device: LocalDeviceSetting = settings.localDevice ?? 'auto';
         const model = resolveLocalModel(settings);
@@ -108,7 +103,7 @@ export class EmbeddingProviderSection {
             selectedModel = getLocalModelDefinition(settings.localModel)?.id ?? DEFAULT_LOCAL_MODEL_ID;
         }
 
-        new Setting(containerEl)
+        group.addSetting((setting) => setting
             .setName('Model')
             .setDesc(describe((fragment) => {
                 if (this.pendingCustomModel || savedCustomInvalid) {
@@ -127,19 +122,19 @@ export class EmbeddingProviderSection {
                 dropdown
                     .setValue(selectedModel)
                     .onChange(async (value) => this.selectLocalModel(value));
-            });
+            }));
 
         if (showCustom) {
-            this.renderCustomModelId(containerEl, savedCustomInvalid);
+            this.renderCustomModelId(group, savedCustomInvalid);
         }
 
-        this.renderDevice(containerEl, model, device);
-        this.renderPrecision(containerEl, model, device, dtype);
+        this.renderDevice(group, model, device);
+        this.renderPrecision(group, model, device, dtype);
         if (supportsMatryoshka(model)) {
-            this.renderVectorSize(containerEl, model, truncation);
+            this.renderVectorSize(group, model, truncation);
         }
 
-        this.renderPrepareButton(containerEl, 'Download & test model', 'Download (first use only) and load the selected model now, instead of on the first search');
+        this.renderPrepareButton(group, 'Download and test model', 'Download (first use only) and load the selected model now, instead of on the first search.');
     }
 
     private async selectLocalModel(value: string): Promise<void> {
@@ -164,42 +159,45 @@ export class EmbeddingProviderSection {
         await this.saveAndRerender();
     }
 
-    private renderCustomModelId(containerEl: HTMLElement, savedInvalid: boolean): void {
+    private renderCustomModelId(group: SettingGroup, savedInvalid: boolean): void {
         const { settings } = this;
-        let warningEl: HTMLElement | undefined;
 
-        const setting = new Setting(containerEl)
-            .setName('Hugging Face model id')
-            .setDesc(describe((fragment) => {
-                fragment.createDiv({ text: HF_ID_HINT });
-                fragment.createDiv({ text: 'Applied when you press Enter or leave the field.' });
-                warningEl = fragment.createDiv({ cls: 'mod-warning' });
-            }));
+        group.addSetting((setting) => {
+            let warningEl: HTMLElement | undefined;
 
-        const showWarning = (value: string) => {
-            if (!warningEl) return;
-            const trimmed = value.trim();
-            if (trimmed && !isValidHfModelId(trimmed)) {
-                warningEl.setText(`"${trimmed}" is not a valid Hugging Face model id.`);
-            } else if (!trimmed && savedInvalid) {
-                warningEl.setText('No custom model id set.');
-            } else {
-                warningEl.setText('');
-            }
-        };
+            setting
+                .setName('Hugging Face model id')
+                .setDesc(describe((fragment) => {
+                    fragment.createDiv({ text: HF_ID_HINT });
+                    fragment.createDiv({ text: 'Applied when you press Enter or leave the field.' });
+                    warningEl = fragment.createDiv({ cls: 'mod-warning' });
+                }));
 
-        setting.addText((text) => {
-            text
-                .setPlaceholder('owner/model-name')
-                .setValue(settings.localCustomModelId ?? '')
-                .onChange((value) => showWarning(value));
+            const showWarning = (value: string) => {
+                if (!warningEl) return;
+                const trimmed = value.trim();
+                if (trimmed && !isValidHfModelId(trimmed)) {
+                    warningEl.setText(`"${trimmed}" is not a valid Hugging Face model id.`);
+                } else if (!trimmed && savedInvalid) {
+                    warningEl.setText('No custom model id set.');
+                } else {
+                    warningEl.setText('');
+                }
+            };
 
-            // Commit on Enter/blur only: every keystroke would otherwise swap the model
-            // (and schedule a reindex) for half-typed ids.
-            text.inputEl.addEventListener('change', () => {
-                void this.commitCustomModelId(text.inputEl.value);
+            setting.addText((text) => {
+                text
+                    .setPlaceholder('owner/model-name')
+                    .setValue(settings.localCustomModelId ?? '')
+                    .onChange((value) => showWarning(value));
+
+                // Commit on Enter/blur only: every keystroke would otherwise swap the model
+                // (and schedule a reindex) for half-typed ids.
+                text.inputEl.addEventListener('change', () => {
+                    void this.commitCustomModelId(text.inputEl.value);
+                });
+                showWarning(text.inputEl.value);
             });
-            showWarning(text.inputEl.value);
         });
     }
 
@@ -224,13 +222,13 @@ export class EmbeddingProviderSection {
         await this.saveAndRerender();
     }
 
-    private renderDevice(containerEl: HTMLElement, model: LocalModelDefinition, device: LocalDeviceSetting): void {
+    private renderDevice(group: SettingGroup, model: LocalModelDefinition, device: LocalDeviceSetting): void {
         const { settings } = this;
         // With precision on Auto, CPU and GPU may resolve to different precisions (= different index)
         const autoDtypeDiffers = (settings.localDtype ?? 'auto') === 'auto'
             && model.defaultDtype !== model.wasmDefaultDtype;
 
-        new Setting(containerEl)
+        group.addSetting((setting) => setting
             .setName('Device')
             .setDesc(describe((fragment) => {
                 fragment.createDiv({ text: 'Where the model runs. Auto uses the GPU (WebGPU) when available and falls back to the CPU.' });
@@ -250,11 +248,11 @@ export class EmbeddingProviderSection {
                         settings.localDevice = value as LocalDeviceSetting;
                         await this.saveAndRerender();
                     });
-            });
+            }));
     }
 
     private renderPrecision(
-        containerEl: HTMLElement,
+        group: SettingGroup,
         model: LocalModelDefinition,
         device: LocalDeviceSetting,
         resolved: LocalDtype,
@@ -266,7 +264,7 @@ export class EmbeddingProviderSection {
             : 'auto';
         const autoDtype = resolveLocalDtype(model, 'auto', device);
 
-        new Setting(containerEl)
+        group.addSetting((setting) => setting
             .setName('Precision')
             .setDesc(describe((fragment) => {
                 fragment.createDiv({ text: `Model weight precision. Smaller is faster to download and run on the CPU; fp32/fp16 are fastest on WebGPU. In use: ${resolved}.` });
@@ -281,15 +279,15 @@ export class EmbeddingProviderSection {
                         settings.localDtype = value as LocalDtypeSetting;
                         await this.saveAndRerender();
                     });
-            });
+            }));
     }
 
     /** Matryoshka truncation, for models trained to support it. 0 = full dimension. */
-    private renderVectorSize(containerEl: HTMLElement, model: LocalModelDefinition, truncation: number | undefined): void {
+    private renderVectorSize(group: SettingGroup, model: LocalModelDefinition, truncation: number | undefined): void {
         const { settings } = this;
         const fullLabel = model.dimension ? `${model.dimension} (full)` : 'Full';
 
-        new Setting(containerEl)
+        group.addSetting((setting) => setting
             .setName('Vector size')
             .setDesc(describe((fragment) => {
                 fragment.createDiv({ text: 'Dimensions kept per vector. Smaller vectors use less storage and search faster, with a slight loss in quality.' });
@@ -307,7 +305,7 @@ export class EmbeddingProviderSection {
                         settings.localEmbeddingDimension = Number.isFinite(size) && size > 0 ? size : 0;
                         await this.saveAndRerender();
                     });
-            });
+            }));
     }
 
     /** Precision not published for the selected model: fall back to Auto so the dropdown matches. */
@@ -320,10 +318,10 @@ export class EmbeddingProviderSection {
 
     // --- Ollama provider ---
 
-    private renderOllama(containerEl: HTMLElement): void {
+    private renderOllama(group: SettingGroup): void {
         const { settings, plugin } = this;
 
-        new Setting(containerEl)
+        group.addSetting((setting) => setting
             .setName('Ollama URL')
             .setDesc('URL of your Ollama server')
             .addText((text) => text
@@ -332,9 +330,9 @@ export class EmbeddingProviderSection {
                 .onChange((value) => {
                     settings.ollamaUrl = value;
                     plugin.scheduleSettingsSave();
-                }));
+                })));
 
-        new Setting(containerEl)
+        group.addSetting((setting) => setting
             .setName('Embedding model')
             .setDesc('Ollama model to use for embeddings (e.g., nomic-embed-text, bge-m3). Changing it rebuilds the semantic index.')
             .addText((text) => text
@@ -343,35 +341,46 @@ export class EmbeddingProviderSection {
                 .onChange((value) => {
                     settings.embeddingModel = value.trim() || DEFAULT_EMBEDDING_MODEL;
                     plugin.scheduleSettingsSave();
-                }));
+                })));
 
-        this.renderPrepareButton(containerEl, 'Test connection', 'Check that Ollama is reachable and the model produces embeddings');
+        this.renderPrepareButton(group, 'Test connection', 'Check that Ollama is reachable and the model produces embeddings.');
     }
 
     // --- Shared ---
 
-    private renderPrepareButton(containerEl: HTMLElement, label: string, desc: string): void {
+    private renderPrepareButton(group: SettingGroup, label: string, desc: string): void {
         const { plugin } = this;
 
-        new Setting(containerEl)
-            .setName(label)
-            .setDesc(desc)
-            .addButton((button) => button
-                .setButtonText(label)
-                .onClick(async () => {
-                    button.setDisabled(true);
-                    button.setButtonText('Working...');
-                    try {
-                        // Flush any debounced text edits so the current values are tested
-                        await plugin.saveSettings();
-                        const result = await plugin.prepareEmbeddingModel();
-                        new Notice(`Semantic search: ${result.message}`, result.ok ? 5000 : 8000);
-                    } catch (error) {
-                        new Notice(`Semantic search: ${error instanceof Error ? error.message : String(error)}`, 8000);
-                    } finally {
-                        button.setDisabled(false);
-                        button.setButtonText(label);
-                    }
-                }));
+        group.addSetting((setting) => {
+            let statusEl: HTMLElement | undefined;
+
+            setting
+                .setName(label)
+                .setDesc(describe((fragment) => {
+                    fragment.createDiv({ text: desc });
+                    statusEl = createStatus(fragment.createDiv());
+                }))
+                .addButton((button) => button
+                    .setButtonText(label)
+                    .onClick(async () => {
+                        button.setDisabled(true);
+                        button.setButtonText('Working...');
+                        statusEl?.setText('');
+                        try {
+                            // Flush any debounced text edits so the current values are tested
+                            await plugin.saveSettings();
+                            const result = await plugin.prepareEmbeddingModel();
+                            statusEl?.setText(result.message);
+                            new Notice(`Semantic search: ${result.message}`, result.ok ? 5000 : 8000);
+                        } catch (error) {
+                            const message = error instanceof Error ? error.message : String(error);
+                            statusEl?.setText(`Failed: ${message}`);
+                            new Notice(`Semantic search: ${message}`, 8000);
+                        } finally {
+                            button.setDisabled(false);
+                            button.setButtonText(label);
+                        }
+                    }));
+        });
     }
 }

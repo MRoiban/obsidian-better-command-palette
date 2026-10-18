@@ -2,12 +2,17 @@
  * Modal for semantic search interface that matches the file search window UI
  */
 
-import {
-    App, SuggestModal, setIcon, Notice, TFile,
-} from 'obsidian';
+import { App, SuggestModal, TFile } from 'obsidian';
 import BetterCommandPalettePlugin from '../../main';
 import { SemanticSearchResult } from './types';
 import { logger } from '../../utils/logger';
+import { renderSuggestionRow } from '../../ui/suggestion-row';
+import { buildFileRow } from '../../ui/file-row';
+import {
+    formatRecentLabel, formatScore, toSingleLine,
+} from '../../ui/suggestion-format';
+import { installRenderHook, PromptChrome, PromptStatus } from '../../ui/prompt-chrome';
+import { getSemanticStatus, isSameStatus, openPluginSettings } from '../../ui/semantic-status';
 
 interface SemanticMatch {
     id: string;
@@ -15,6 +20,8 @@ interface SemanticMatch {
     excerpt?: string;
     similarity: number;
     file: TFile;
+    /** Set for default suggestions shown for an empty query (not search results) */
+    defaultKind?: 'recent' | 'modified';
     matches: {
         titleMatch: boolean;
         tagMatch: boolean;
@@ -24,6 +31,13 @@ interface SemanticMatch {
 
 /** Delay after the last keystroke before a query is embedded. */
 const SEARCH_DEBOUNCE_MS = 200;
+
+/** How often the status line is refreshed while the modal is open */
+const STATUS_POLL_MS = 1000;
+
+const EMPTY_STATE_TEXT = 'No matching notes.';
+
+const UNAVAILABLE_STATE_TEXT = 'Semantic search is unavailable.';
 
 export class SemanticSearchModal extends SuggestModal<SemanticMatch> {
     plugin: BetterCommandPalettePlugin;
@@ -45,6 +59,17 @@ export class SemanticSearchModal extends SuggestModal<SemanticMatch> {
 
     private isClosed = false;
 
+    private readonly chrome: PromptChrome;
+
+    /** Status from a failed search (shown until the next search) */
+    private searchErrorStatus: PromptStatus | null = null;
+
+    private currentStatus: PromptStatus | null = null;
+
+    private statusPollTimer: number | null = null;
+
+    private unsubscribeProviderStatus?: () => void;
+
     constructor(app: App, plugin: BetterCommandPalettePlugin) {
         super(app);
         this.plugin = plugin;
@@ -53,8 +78,15 @@ export class SemanticSearchModal extends SuggestModal<SemanticMatch> {
         this.modalEl.addClass('better-command-palette');
         this.modalEl.setAttribute('palette-mode', 'semantic-search');
 
-        // Set the placeholder to match file search
-        this.setPlaceholder('Search for concepts, ideas, or topics...');
+        this.setPlaceholder('Search for concepts, ideas, or topics…');
+        this.emptyStateText = EMPTY_STATE_TEXT;
+
+        this.chrome = new PromptChrome(this);
+        this.chrome.setModeLabel('Semantic');
+        installRenderHook(this, () => {
+            this.refreshStatus();
+            this.chrome.attach();
+        });
 
         // Set instructions to match file search
         this.setInstructions([
@@ -70,7 +102,9 @@ export class SemanticSearchModal extends SuggestModal<SemanticMatch> {
             id: result.file.path,
             text: result.title,
             excerpt: result.excerpt,
-            similarity: result.similarity,
+            // Results are ordered by relevance (similarity + metadata, or the reranker),
+            // so show that score; raw similarity would read out of order.
+            similarity: result.relevanceScore,
             file: result.file,
             matches: result.matches,
         }));
@@ -156,6 +190,7 @@ export class SemanticSearchModal extends SuggestModal<SemanticMatch> {
                     text: file.basename,
                     similarity: 1.0, // High relevance for recent files
                     file,
+                    defaultKind: 'recent',
                     matches: {
                         titleMatch: false,
                         tagMatch: false,
@@ -177,6 +212,7 @@ export class SemanticSearchModal extends SuggestModal<SemanticMatch> {
                         text: file.basename,
                         similarity: 0.8, // Good relevance for recently modified
                         file,
+                        defaultKind: 'modified',
                         matches: {
                             titleMatch: false,
                             tagMatch: false,
@@ -218,13 +254,22 @@ export class SemanticSearchModal extends SuggestModal<SemanticMatch> {
             const searchEngine = this.plugin.getSemanticSearchEngine();
             if (!searchEngine) {
                 logger.warn('[SemanticSearch] Search engine not available');
-                new Notice('Semantic search not available');
+                this.searchErrorStatus = {
+                    text: 'Semantic search isn\'t available. Turn it on in settings.',
+                    isError: true,
+                    action: { label: 'Open settings', onClick: () => openPluginSettings(this.plugin) },
+                };
+                this.emptyStateText = UNAVAILABLE_STATE_TEXT;
                 // Mark as completed so the re-render below does not retry in a loop
                 this.currentResults = [];
                 this.lastCompletedQuery = query;
                 return;
             }
 
+            this.searchErrorStatus = null;
+            // Blank while the search (and possibly the model load) is in flight, so
+            // "No matching notes." only appears for a finished search
+            this.emptyStateText = '';
             const startTime = Date.now();
             const results = await searchEngine.search(query, { signal: abortController.signal });
             if (!isLatest()) {
@@ -233,13 +278,17 @@ export class SemanticSearchModal extends SuggestModal<SemanticMatch> {
 
             logger.debug(`[SemanticSearch] Found ${results.length} results in ${Date.now() - startTime}ms`);
             this.currentResults = this.convertToMatches(results);
+            this.emptyStateText = EMPTY_STATE_TEXT;
             this.lastCompletedQuery = query;
         } catch (error) {
             if (!isLatest() || (error instanceof Error && error.name === 'AbortError')) {
                 return;
             }
             logger.error('[SemanticSearch] Search error:', error);
-            new Notice(`Search error: ${error.message}`);
+            this.searchErrorStatus = {
+                text: `Search failed: ${error instanceof Error ? error.message : String(error)}`,
+                isError: true,
+            };
             this.currentResults = [];
             this.lastCompletedQuery = query;
         } finally {
@@ -258,245 +307,41 @@ export class SemanticSearchModal extends SuggestModal<SemanticMatch> {
     }
 
     renderSuggestion(match: SemanticMatch, el: HTMLElement): void {
-    // Use the exact same structure as the file search modal
-        el.addClass('mod-complex');
-
-        const suggestionContent = el.createEl('div', 'suggestion-content');
-        const suggestionAux = el.createEl('div', 'suggestion-aux');
-
-        // Use the same rendering approach as enhanced file adapter
-        this.renderFileSearchStyle(match, suggestionContent);
-
-        // Add context-appropriate indicators in aux section
-        if (match.similarity === 1.0) {
-            // Recent file indicator
-            const recentEl = suggestionAux.createEl('span', {
-                cls: 'suggestion-hotkey recent',
-                text: 'Recent',
-            });
-            recentEl.title = 'Recently opened file';
-        } else if (match.similarity === 0.8) {
-            // Recently modified indicator
-            const modifiedEl = suggestionAux.createEl('span', {
-                cls: 'suggestion-hotkey modified',
-                text: 'Modified',
-            });
-            modifiedEl.title = 'Recently modified file';
-        } else {
-            // Semantic similarity score for actual search results
-            const scoreEl = suggestionAux.createEl('span', {
-                cls: 'suggestion-hotkey',
-                text: `${Math.round(match.similarity * 100)}%`,
-            });
-            scoreEl.title = `Semantic similarity: ${Math.round(match.similarity * 100)}%`;
-        }
-
-        // Add compact match type badges if they exist (for search results)
-        if (match.similarity < 1.0 && match.similarity !== 0.8) {
-            const badges: string[] = [];
-            if (match.matches.titleMatch) badges.push('title');
-            if (match.matches.tagMatch) badges.push('tag');
-            if (match.matches.recentlyModified) badges.push('recent');
-
-            if (badges.length > 0) {
-                const badgeEl = suggestionAux.createEl('span', {
-                    cls: 'suggestion-flair',
-                    text: badges.join(' • '),
-                });
-                badgeEl.title = `Matches: ${badges.join(', ')}`;
-            }
-        }
-    }
-
-    /**
-   * Render using the exact same style as file search
-   */
-    private renderFileSearchStyle(match: SemanticMatch, content: HTMLElement): void {
-        let noteName = match.file.basename;
-
-        // Remove .md extension for cleaner display
-        if (noteName.endsWith('.md')) {
-            noteName = noteName.slice(0, -3);
-        }
-
-        // Create main title container
-        const suggestionEl = content.createEl('div', {
-            cls: 'suggestion-title',
-        });
-
-        // Add file type indicator
-        this.addFileTypeIndicator(suggestionEl, match.file.path);
-
-        // Add recently accessed indicator if applicable
-        if (this.isRecentlyAccessed(match)) {
-            suggestionEl.createEl('div', { cls: 'recent-indicator' });
-        }
-
-        // Smart path rendering that emphasizes filename while showing context
-        // Now relies on CSS text-overflow: ellipsis for clipping
-        this.renderSmartPath(suggestionEl, match.file.path, noteName);
-
-        // Enhanced tag rendering (same as file search)
         const metadata = this.app.metadataCache.getFileCache(match.file);
-        if (metadata?.tags && metadata.tags.length > 0) {
-            const tagsEl = content.createEl('div', {
-                cls: 'suggestion-note',
+        const tags = (metadata?.tags || []).map((tagRef) => tagRef.tag);
+
+        if (match.defaultKind) {
+            // Empty query: recent and recently modified files render as normal file rows
+            renderSuggestionRow(el, {
+                ...buildFileRow({ path: match.file.path, settings: this.plugin.settings, tags }),
+                auxText: match.defaultKind === 'recent' ? formatRecentLabel(this.plugin.settings.recentlyUsedText) : undefined,
             });
-
-            metadata.tags.forEach((tagRef) => {
-                if (tagRef.tag.trim()) {
-                    tagsEl.createEl('span', {
-                        cls: 'tag',
-                        text: tagRef.tag,
-                    });
-                }
-            });
-        }
-    }
-
-    /**
-   * Add file type indicator based on file extension
-   */
-    private addFileTypeIndicator(container: HTMLElement, filePath: string): void {
-        const extension = this.getFileExtension(filePath);
-        if (!extension) return;
-
-        let typeClass = 'md';
-        let typeText = 'MD';
-
-        switch (extension.toLowerCase()) {
-            case 'md':
-                typeClass = 'md';
-                typeText = 'MD';
-                break;
-            case 'txt':
-                typeClass = 'txt';
-                typeText = 'TXT';
-                break;
-            case 'pdf':
-                typeClass = 'pdf';
-                typeText = 'PDF';
-                break;
-            case 'png':
-            case 'jpg':
-            case 'jpeg':
-            case 'gif':
-            case 'svg':
-                typeClass = 'img';
-                typeText = 'IMG';
-                break;
-            default:
-                typeText = extension.toUpperCase().substring(0, 3);
-        }
-
-        container.createEl('span', {
-            cls: `file-type-indicator ${typeClass}`,
-            text: typeText,
-        });
-    }
-
-    /**
-   * Get file extension from path
-   */
-    private getFileExtension(path: string): string | null {
-        const match = path.match(/\.([^.]+)$/);
-        return match ? match[1] : null;
-    }
-
-    /**
-   * Smart path rendering that emphasizes filename while showing context
-   * Now relies on CSS text-overflow: ellipsis for clipping
-   */
-    private renderSmartPath(container: HTMLElement, fullPath: string, displayName: string): void {
-    // Simply set the full path and let CSS handle the ellipsis
-        container.textContent = fullPath;
-
-        // Always set the full path as tooltip
-        container.title = fullPath;
-    }
-
-    /**
-   * Render truncated path for secondary display
-   */
-    private renderTruncatedPath(container: HTMLElement, path: string): void {
-        const maxLength = 60;
-
-        if (path.length <= maxLength) {
-            container.textContent = path;
             return;
         }
 
-        // Show beginning and end of path
-        const parts = path.split('/');
-        if (parts.length > 3) {
-            const start = parts.slice(0, 2).join('/');
-            const end = parts.slice(-2).join('/');
-            container.innerHTML = `${start}/<span class="path-ellipsis">…</span>/${end}`;
-        } else {
-            // Truncate in the middle
-            const truncated = `${path.substring(0, 30)}…${path.substring(path.length - 25)}`;
-            container.textContent = truncated;
+        const excerpt = toSingleLine(match.excerpt);
+        renderSuggestionRow(el, {
+            ...buildFileRow({
+                path: match.file.path,
+                settings: this.plugin.settings,
+                // Snippet of the best-matching chunk; fall back to tags when there is none
+                details: excerpt ? [excerpt] : undefined,
+                tags,
+            }),
+            auxText: formatScore(match.similarity),
+        });
+    }
+
+    /** Status line: search errors first, then model loading/errors and indexing progress. */
+    private refreshStatus(): void {
+        const status = this.searchErrorStatus ?? getSemanticStatus(this.plugin);
+        if (!isSameStatus(status, this.currentStatus)) {
+            this.currentStatus = status;
+            this.chrome.setStatus(status);
         }
-
-        container.title = path;
     }
 
-    /**
-   * Get display name (removing .md extension if needed)
-   */
-    private getDisplayName(filename: string): string {
-    // Remove .md extension for cleaner display
-        if (filename.endsWith('.md')) {
-            return filename.slice(0, -3);
-        }
-        return filename;
-    }
-
-    /**
-   * Check if file was recently accessed
-   */
-    private isRecentlyAccessed(match: SemanticMatch): boolean {
-    // Consider files modified in the last 24 hours as recent
-        const daysSince = (Date.now() - match.file.stat.mtime) / (1000 * 60 * 60 * 24);
-        return daysSince < 1;
-    }
-
-    /**
-   * Highlight matched terms in text
-   */
-    private highlightMatches(text: string, query: string): string {
-        if (!query || query.length < 2) return this.escapeHtml(text);
-
-        const escapedText = this.escapeHtml(text);
-        const terms = query.toLowerCase().split(/\s+/).filter((term) => term.length >= 2);
-
-        let highlightedText = escapedText;
-
-        for (const term of terms) {
-            const regex = new RegExp(`(${this.escapeRegex(term)})`, 'gi');
-            highlightedText = highlightedText.replace(regex, '<span class="snippet-highlight">$1</span>');
-        }
-
-        return highlightedText;
-    }
-
-    /**
-   * Escape HTML characters
-   */
-    private escapeHtml(text: string): string {
-        const div = document.createElement('div');
-        div.textContent = text;
-        return div.innerHTML;
-    }
-
-    /**
-   * Escape regex special characters
-   */
-    private escapeRegex(text: string): string {
-        return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    }
-
-    onChooseSuggestion(match: SemanticMatch | null, evt: MouseEvent | KeyboardEvent): void {
+    onChooseSuggestion(match: SemanticMatch | null, _evt: MouseEvent | KeyboardEvent): void {
         if (!match) {
             // Semantic search doesn't support creating new items
             return;
@@ -512,6 +357,12 @@ export class SemanticSearchModal extends SuggestModal<SemanticMatch> {
         logger.debug('[SemanticSearch] Modal opened');
         super.onOpen();
         this.isClosed = false;
+
+        // Keep the status line current (model loading, indexing progress)
+        this.unsubscribeProviderStatus = this.plugin.getEmbeddingService()
+            ?.onProviderStatusChange(() => this.refreshStatus());
+        this.statusPollTimer = window.setInterval(() => this.refreshStatus(), STATUS_POLL_MS);
+        this.refreshStatus();
 
         // Load the local embedding model in the background so the first query is fast
         this.plugin.getEmbeddingService()?.warmup().catch((error) => {
@@ -537,6 +388,15 @@ export class SemanticSearchModal extends SuggestModal<SemanticMatch> {
         super.onClose();
         this.isClosed = true;
         this.cancelPendingSearch();
+        this.unsubscribeProviderStatus?.();
+        this.unsubscribeProviderStatus = undefined;
+        if (this.statusPollTimer !== null) {
+            window.clearInterval(this.statusPollTimer);
+            this.statusPollTimer = null;
+        }
+        this.searchErrorStatus = null;
+        this.currentStatus = null;
+        this.chrome.setStatus(null);
         this.currentResults = [];
         this.lastCompletedQuery = '';
     }

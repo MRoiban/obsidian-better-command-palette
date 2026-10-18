@@ -1,0 +1,15 @@
+/* Settings use native SettingGroup markup; the theme draws everything else. */
+
+/* Status text inside a setting description (index progress, test results) */
+.bcp-setting-status {
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+}
+
+/* Some tabs render into a wrapper (so they can re-render in place). The wrapper
+   breaks Obsidian's `.setting-group + .setting-group` spacing, so restore it
+   with the same token at wrapper boundaries. */
+.bcp-settings-section:not(:first-child),
+.bcp-settings-section + .setting-group {
+    margin-top: var(--size-4-6);
+}

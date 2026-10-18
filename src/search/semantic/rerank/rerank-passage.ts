@@ -5,11 +5,14 @@
 import type { MetadataCache, TFile } from 'obsidian';
 
 /**
- * Passages are cut to this many characters before tokenization. Keeps inference
- * time bounded (~300 tokens) and the query + passage under the token limit, so the
- * tokenizer rarely has to truncate (which would drop the closing separator token).
+ * Passages are cut to this many characters (~150 tokens) before tokenization.
+ * Inference time is roughly linear in total characters: measured on WebGPU with
+ * mxbai-rerank-xsmall, 20 passages take ~1.1 s at 600 chars vs ~2.1 s at 1200,
+ * so 600 keeps the default top-20 inside RERANK_TIME_BUDGET_MS. It also keeps
+ * query + passage under the token limit, so the tokenizer rarely truncates
+ * (which would drop the closing separator token).
  */
-export const MAX_RERANK_PASSAGE_CHARS = 1200;
+export const MAX_RERANK_PASSAGE_CHARS = 600;
 
 /** Frontmatter `title` when present, otherwise the file name without extension. */
 export function getNoteTitle(file: TFile, metadataCache: MetadataCache): string {

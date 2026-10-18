@@ -4,10 +4,14 @@
  */
 
 import {
-    App, SuggestModal, setIcon, Notice, TFile, Editor, Keymap, Platform,
+    App, SuggestModal, Notice, TFile, Editor, Keymap, Platform,
 } from 'obsidian';
 import BetterCommandPalettePlugin from '../main';
 import { logger } from '../utils/logger';
+import { renderSuggestionRow } from './suggestion-row';
+import { buildFileRow, buildUnresolvedRow } from './file-row';
+import { formatRecentLabel, getQueryTerms } from './suggestion-format';
+import { PromptChrome } from './prompt-chrome';
 
 interface QuickLinkMatch {
     id: string;
@@ -78,6 +82,8 @@ export class QuickLinkModal extends SuggestModal<QuickLinkMatch> {
         this.modalEl.setAttribute('search-engine', searchEngine);
 
         this.setPlaceholder(`Showing results for "${this.truncateText(selectedText, 25)}" (or type to search)`);
+        this.emptyStateText = 'No matching notes.';
+        new PromptChrome(this).setModeLabel('Quick link');
 
         // Set instructions
         this.setInstructions([
@@ -360,113 +366,34 @@ export class QuickLinkModal extends SuggestModal<QuickLinkMatch> {
     }
 
     renderSuggestion(match: QuickLinkMatch, el: HTMLElement): void {
-        el.addClass('mod-complex');
+        const query = this.inputEl.value || this.selectedText;
+        const highlights = getQueryTerms(query);
 
-        const suggestionContent = el.createEl('span', 'suggestion-content');
-        const suggestionAux = el.createEl('span', 'suggestion-aux');
-        const flairContainer = suggestionAux.createEl('span', 'suggestion-flair');
+        const row = match.file
+            ? buildFileRow({
+                path: match.file.path,
+                settings: this.plugin.settings,
+                tags: this.getFileTags(match.file),
+                highlights,
+            })
+            : buildUnresolvedRow(match.text, highlights);
 
-        setIcon(flairContainer, 'cross');
-        flairContainer.ariaLabel = 'Ignore suggestion';
-        flairContainer.onClickEvent((event) => {
-            event.preventDefault();
-            event.stopPropagation();
-            this.ignoreSuggestion(match);
+        renderSuggestionRow(el, {
+            ...row,
+            auxText: this.isRecentlyAccessed(match)
+                ? formatRecentLabel(this.plugin.settings.recentlyUsedText)
+                : undefined,
+            flair: {
+                icon: 'x',
+                label: 'Ignore suggestion',
+                onClick: () => this.ignoreSuggestion(match),
+            },
         });
-
-        this.renderFileSearchStyle(match, suggestionContent);
     }
 
-    /**
-   * Render suggestion using the same style as file search modal
-   */
-    private renderFileSearchStyle(match: QuickLinkMatch, el: HTMLElement): void {
-        let noteName = match.text;
-
-        // Build the displayed note name without its full path if required in settings
-        if (this.plugin.settings.displayOnlyNotesNames) {
-            noteName = match.text.split('/').pop() || match.text;
-        }
-
-        // Build the displayed note name without its Markdown extension if required in settings
-        if (this.plugin.settings.hideMdExtension && noteName.endsWith('.md')) {
-            noteName = noteName.slice(0, -3);
-        }
-
-        // Create main title container
-        const suggestionEl = el.createEl('div', {
-            cls: 'suggestion-title',
-        });
-
-        // Add recently accessed indicator if applicable
-        if (match.file && this.isRecentlyAccessed(match)) {
-            suggestionEl.createEl('div', { cls: 'recent-indicator' });
-        }
-
-        // Smart path rendering - show folder structure more intelligently
-        if (!this.plugin.settings.displayOnlyNotesNames && match.file && match.file.path.includes('/')) {
-            this.renderSmartPath(suggestionEl, match.file.path, noteName);
-        } else {
-            suggestionEl.createEl('span', {
-                cls: 'path-part filename',
-                text: noteName,
-            });
-        }
-
-        // Add unresolved styling if this is an unresolved link
-        if (match.isUnresolved) {
-            suggestionEl.addClass('unresolved');
-        }
-
-        // Handle aliases (if we ever need them)
-        if (match.id.includes(':')) {
-            suggestionEl.createEl('span', {
-                cls: 'suggestion-name',
-                text: match.text,
-            }).ariaLabel = 'Alias';
-
-            setIcon(suggestionEl, 'right-arrow-with-tail');
-
-            const [, path] = match.id.split(':');
-            suggestionEl.createEl('span', {
-                cls: 'suggestion-note',
-                text: path,
-            });
-        }
-
-    }
-
-    /**
-   * Render smart path showing folder structure
-   */
-    private renderSmartPath(container: HTMLElement, fullPath: string, displayName: string): void {
-        if (!fullPath.includes('/')) {
-            container.createEl('span', {
-                cls: 'path-part filename',
-                text: displayName,
-            });
-            return;
-        }
-
-        const pathParts = fullPath.split('/');
-        const fileName = pathParts.pop() || displayName;
-
-        // Show folder structure
-        if (pathParts.length > 0) {
-            const folderPath = pathParts.join('/');
-            container.createEl('span', {
-                cls: 'path-part folder',
-                text: `${folderPath}/`,
-            });
-        }
-
-        // Show filename
-        container.createEl('span', {
-            cls: 'path-part filename',
-            text: this.plugin.settings.hideMdExtension && fileName.endsWith('.md')
-                ? fileName.slice(0, -3)
-                : fileName,
-        });
+    private getFileTags(file: TFile): string[] {
+        const cache = this.app.metadataCache.getFileCache(file);
+        return (cache?.tags || []).map((tagRef) => tagRef.tag);
     }
 
     /**
